@@ -54,8 +54,8 @@ Run it from a pane inside a git repository. It:
    `<worktree folder>/<repository>/<branch>`, with `/` in the branch replaced by `-`. The
    [worktree folder](#task-settings) defaults to `~/tern/worktrees`, and `<repository>` is the
    main checkout's folder name, even when you start the task from inside another worktree.
-3. Opens a session named after the task, running your default agent (Tern's **New agent block**)
-   in the worktree.
+3. Opens a session named after the task, running your default agent in the worktree in place of
+   the session's shell.
 
 On first load the plugin binds ⌘⇧N to New task through Tern's settings. It does this only once,
 so if you rebind the key later, your choice stays.
@@ -72,7 +72,8 @@ task. It:
 
 Closing a task's session with Tern's own **Close session** cleans up the same way, except that
 it doesn't check for changes before closing. If git then refuses to remove the worktree, the
-worktree stays on disk and a toast shows git's message.
+worktree stays on disk and a toast shows git's message. A task session that Tern closes because
+its last pane exited (the agent quit, for example) keeps its worktree and branch.
 
 The plugin only ever removes worktrees it created. Other sessions close normally, and other
 worktrees are never touched.
@@ -166,8 +167,9 @@ changed:
 | `DASHBOARD_REFRESH_MS` | `15000` | How often task git state refreshes |
 | `PR_REFRESH_EVERY` | `4` | Fetch pull requests every Nth refresh |
 
-The agent is whatever Tern's agent settings name (`omp` by default). Where it opens follows
-Tern's agent-placement setting.
+The agent is whatever Tern's agent settings name (`omp` by default). If Tern can't start it in
+place of the shell, the plugin falls back to **New agent block**, which opens it where Tern's
+agent-placement setting says and leaves the shell open.
 
 ## How it works
 
