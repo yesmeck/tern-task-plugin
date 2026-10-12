@@ -1,6 +1,6 @@
 schema = 1
 id = "worktree-sessions"
 name = "Tasks"
-version = "0.2.0"
-description = "A task is a session with its own git worktree: New task creates both, closing the session removes the worktree."
+version = "0.3.0"
+description = "A task is a session with its own git worktree: New task creates both, Delete task removes them, and the task dashboard shows them all."
 window = "window.luau"
