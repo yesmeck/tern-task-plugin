@@ -3,8 +3,8 @@
 --
 -- New task (palette, cmd+shift+n): asks for a task name, creates a worktree
 -- on a new branch named after it (from the focused pane's HEAD) beside the
--- main checkout, and opens a session named after the task with its first tab
--- in the worktree and the default agent (Tern's New agent block) beside it.
+-- main checkout, and opens a session named after the task running only the
+-- default agent (Tern's New agent block) in the worktree.
 --
 --   task name:      Fix login redirect
 --   branch:         fix-login-redirect
@@ -594,11 +594,19 @@ local function start_task(cwd: string, task: Task)
 			cx:toast("success", "Task started: " .. task.name, task.path)
 			refresh_dashboard(cx)
 			if OPEN_AGENT then
-				-- Tern's own New agent block: the default agent, placed by the
-				-- agent-placement setting, in the focused pane's directory (the
-				-- new session's first pane, in the worktree). Last, so nothing
-				-- else in this callback runs after the heaviest step.
+				-- Tern's own New agent block: the default agent, in the focused
+				-- pane's directory (the new session's first pane, in the
+				-- worktree). Then close that shell so the session holds only
+				-- the agent; with agent placement set to replace an idle shell
+				-- it is already gone. Last, so little runs after the heaviest
+				-- step.
+				local shell = cx.session:focused()
 				cx:command("new_agent_block")
+				if shell ~= nil and cx.session:focused() ~= shell then
+					pcall(function()
+						cx.layout:close(shell :: number)
+					end)
+				end
 			end
 		end
 	)
