@@ -316,7 +316,7 @@ local REVIEW_BADGES = {
 local function pr_line(id: number): Node?
 	local pr = prs[id]
 	if pr == nil then
-		return ui.text({ ui.span("PR: checking…", "muted") })
+		return nil
 	elseif pr == false then
 		return ui.text({ ui.span("No pull request", "muted") })
 	end
@@ -342,13 +342,11 @@ local function task_card(t: OpenTask): Node
 	if t.current then
 		table.insert(badges, ui.badge("current", "accent"))
 	end
-	local last = "…"
-	if s == nil then
-		table.insert(badges, ui.badge("checking…", "pending"))
-	elseif (s :: any).missing then
+	local last: string? = nil
+	if s ~= nil and (s :: any).missing then
 		table.insert(badges, ui.badge("worktree missing", "error"))
 		last = "—"
-	else
+	elseif s ~= nil then
 		local st = s :: { changes: number, ahead: number, last: string }
 		if st.changes > 0 then
 			table.insert(badges, ui.badge(st.changes .. " uncommitted", "warning"))
@@ -365,15 +363,17 @@ local function task_card(t: OpenTask): Node
 	if pr then
 		table.insert(body, pr)
 	end
-	table.insert(body, ui.row(badges))
-	table.insert(
-		body,
-		ui.kv({
-			{ "branch", ui.span(t.task.branch, "code") },
-			{ "worktree", ui.path(t.task.path) },
-			{ "last commit", last },
-		})
-	)
+	if #badges > 0 then
+		table.insert(body, ui.row(badges))
+	end
+	local details = {
+		{ "branch", ui.span(t.task.branch, "code") },
+		{ "worktree", ui.path(t.task.path) },
+	}
+	if last ~= nil then
+		table.insert(details, { "last commit", last })
+	end
+	table.insert(body, ui.kv(details))
 	table.insert(
 		body,
 		ui.el("div", { class = "tk-actions" }, {
