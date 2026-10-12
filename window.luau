@@ -27,7 +27,7 @@
 -- "Fix login · #3413 ✓ · ±2" (PR, checks, uncommitted files), kept up to
 -- date in the background.
 --
--- Task dashboard: a kanban canvas of the open tasks in the current
+-- Task dashboard: a native block view of the open tasks in the current
 -- repository, in columns by pull request (In progress: none yet, Draft, In
 -- review, Done: merged or closed), each card with its git state, PR checks
 -- and review, and Open / Delete buttons. Task state refreshes in the
@@ -39,35 +39,15 @@
 -- callbacks.
 
 local ui = tern.ui
+local Dashboard = require("./dashboard")
 
-tern.css(
-	"board",
-	[[
-.tk-board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
-.tk-column { flex: 1 1 0; min-width: 260px; display: flex; flex-direction: column; gap: 8px; }
-.tk-toolbar { display: flex; gap: 8px; }
-.tk-actions { display: flex; gap: 6px; }
-/* ui.el buttons come unstyled (class sf-el); give them button chrome. */
-button.tk-btn {
-	padding: 3px 12px;
-	border: 1px solid var(--l2);
-	border-radius: 6px;
-	background: var(--l1);
-	color: var(--t1);
-	cursor: pointer;
-}
-button.tk-btn:hover { background: var(--l2); }
-button.tk-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--page); }
-button.tk-btn.danger { color: var(--bad); }
-button.tk-btn.danger:hover { border-color: var(--bad); }
-]]
-)
 
 -- How long after Close tab or Delete task a task's tab closing still counts
 -- as asked for, e.g. while Tern asks to confirm ending a running program.
 local CLOSE_INTENT_S = 120
 
-local DASHBOARD_TITLE = "Tasks"
+local DASHBOARD_KIND = tern.plugin.id .. ".dashboard"
+local DASHBOARD_LINK_PREFIX = tern.plugin.id .. "://dashboard/"
 local DASHBOARD_REFRESH_MS = 15000
 -- Start the default agent in a new task's tab.
 local OPEN_AGENT = true
@@ -80,19 +60,8 @@ local PR_REFRESH_EVERY = 4
 type Task = { name: string, branch: string, path: string, main: string, base: string? }
 -- id: the task's tab; session: the session holding it.
 type OpenTask = { id: number, session: number, task: Task, current: boolean }
--- Git state of a task's worktree, as the dashboard shows it.
-type Stats = { changes: number, ahead: number, last: string } | { missing: true }
-
--- The task branch's pull request, from gh. checks: "pass" | "fail" |
--- "pending" | "none"; review: GitHub's reviewDecision, "" when there is none.
-type Pr = {
-	number: string,
-	state: string,
-	draft: boolean,
-	url: string,
-	review: string,
-	checks: string,
-}
+type Stats = Dashboard.Stats
+type Pr = Dashboard.Pr
 
 local stats: { [number]: Stats } = {}
 -- false: gh found no pull request for the branch.
@@ -155,7 +124,7 @@ local function focused_cwd(cx: WindowCx): string?
 		return nil
 	end
 	for _, pane in cx.session:panes() do
-		if pane.pane == id and pane.cwd ~= "" then
+		if pane.pane == id and pane.block ~= DASHBOARD_KIND and pane.cwd ~= "" then
 			return pane.cwd
 		end
 	end
@@ -163,8 +132,8 @@ local function focused_cwd(cx: WindowCx): string?
 end
 
 -- The focused pane's directory, or else that of another pane in the
--- focused tab, then in the current session's other tabs: canvas panes such
--- as the dashboard have no directory.
+-- focused tab, then in the current session's other tabs. A dashboard's
+-- inherited launch directory is not a source repository.
 local function window_cwd(cx: WindowCx): string?
 	local cwd = focused_cwd(cx)
 	if cwd ~= nil then
@@ -179,7 +148,7 @@ local function window_cwd(cx: WindowCx): string?
 	end
 	local fallback: string? = nil
 	for _, pane in cx.session:panes() do
-		if pane.cwd ~= "" and pane.cwd ~= nil and pane.tab ~= nil then
+		if pane.block ~= DASHBOARD_KIND and pane.cwd ~= "" and pane.cwd ~= nil and pane.tab ~= nil then
 			if pane.tab == here then
 				return pane.cwd
 			elseif fallback == nil and table.find(tabs, pane.tab :: number) ~= nil then
@@ -268,9 +237,9 @@ end
 -- Dashboard
 
 local function dashboard_pane(cx: WindowCx): number?
-	for _, c in cx.canvas:list() do
-		if c.owner == tern.plugin.id and c.title == DASHBOARD_TITLE then
-			return c.pane
+	for _, pane in cx.session:panes() do
+		if pane.block == DASHBOARD_KIND then
+			return pane.pane
 		end
 	end
 	return nil
@@ -282,111 +251,9 @@ local function button(text: string, act: string, variant: string?): Node
 	return ui.el("button", { class = class, text = text, actions = { click = act } })
 end
 
--- Kanban columns, left to right. A task's column comes from its PR.
-local COLUMNS = {
-	{ id = "progress", title = "In progress" },
-	{ id = "draft", title = "Draft" },
-	{ id = "review", title = "In review" },
-	{ id = "done", title = "Done" },
-}
 
-local function column_of(id: number): string
-	local pr = prs[id]
-	if not pr then
-		return "progress" -- no PR yet (or not fetched yet)
-	elseif pr.state == "MERGED" or pr.state == "CLOSED" then
-		return "done"
-	elseif pr.draft then
-		return "draft"
-	end
-	return "review"
-end
-
-local CHECK_BADGES = {
-	pass = { "checks pass", "success" },
-	fail = { "checks fail", "error" },
-	pending = { "checks running", "pending" },
-}
-local REVIEW_BADGES = {
-	APPROVED = { "approved", "success" },
-	CHANGES_REQUESTED = { "changes requested", "error" },
-	REVIEW_REQUIRED = { "review required", "muted" },
-}
-
-local function pr_line(id: number): Node?
-	local pr = prs[id]
-	if pr == nil then
-		return nil
-	elseif pr == false then
-		return ui.text({ ui.span("No pull request", "muted") })
-	end
-	local p = pr :: Pr
-	local parts: { Node } = {
-		ui.text({ ui.link("#" .. p.number, p.url, "strong") }),
-		ui.badge(string.lower(p.state), if p.state == "MERGED" then "accent" elseif p.state == "CLOSED" then "muted" else "info"),
-	}
-	local check = CHECK_BADGES[p.checks]
-	if check and p.state == "OPEN" then
-		table.insert(parts, ui.badge(check[1], check[2]))
-	end
-	local review = REVIEW_BADGES[p.review]
-	if review and p.state == "OPEN" then
-		table.insert(parts, ui.badge(review[1], review[2]))
-	end
-	return ui.row(parts)
-end
-
-local function task_card(t: OpenTask): Node
-	local s = stats[t.id]
-	local badges: { Node } = {}
-	if t.current then
-		table.insert(badges, ui.badge("current", "accent"))
-	end
-	local last: string? = nil
-	if s ~= nil and (s :: any).missing then
-		table.insert(badges, ui.badge("worktree missing", "error"))
-		last = "—"
-	elseif s ~= nil then
-		local st = s :: { changes: number, ahead: number, last: string }
-		if st.changes > 0 then
-			table.insert(badges, ui.badge(st.changes .. " uncommitted", "warning"))
-		else
-			table.insert(badges, ui.badge("clean", "success"))
-		end
-		if st.ahead > 0 then
-			table.insert(badges, ui.badge(st.ahead .. (if st.ahead == 1 then " commit" else " commits"), "info"))
-		end
-		last = st.last
-	end
-	local body: { Node } = {}
-	local pr = pr_line(t.id)
-	if pr then
-		table.insert(body, pr)
-	end
-	if #badges > 0 then
-		table.insert(body, ui.row(badges))
-	end
-	local details = {
-		{ "branch", ui.span(t.task.branch, "code") },
-		{ "worktree", ui.path(t.task.path) },
-	}
-	if last ~= nil then
-		table.insert(details, { "last commit", last })
-	end
-	table.insert(body, ui.kv(details))
-	table.insert(
-		body,
-		ui.el("div", { class = "tk-actions" }, {
-			button("Open", "open=" .. tostring(t.id)),
-			button("Delete", "delete=" .. tostring(t.id), "danger"),
-		})
-	)
-	return ui.card({ ui.span(t.task.name, "strong") }, body)
-end
-
--- The main checkout whose tasks this window's board shows, from the
--- window's directory (see set_dashboard_repo); nil shows every task. Per
--- window, so boards in two windows show their own repositories.
+-- The repository selected for this dashboard pane; nil shows every task.
+-- Native blocks mirror the same selection in every window.
 local dashboard_main: string? = nil
 
 local function board_tasks(cx: WindowCx): { OpenTask }
@@ -404,84 +271,100 @@ local function board_tasks(cx: WindowCx): { OpenTask }
 	return found
 end
 
-local function board_view(tasks: { OpenTask }): Node
-	local by_column: { [string]: { OpenTask } } = {}
-	for _, c in COLUMNS do
-		by_column[c.id] = {}
+local function dashboard_snapshot(cx: WindowCx): Dashboard.Snapshot
+	local snapshot: Dashboard.Snapshot = { main = dashboard_main, tasks = tern.json.array({}) }
+	for _, t in board_tasks(cx) do
+		table.insert(snapshot.tasks, {
+			id = t.id,
+			name = t.task.name,
+			branch = t.task.branch,
+			path = t.task.path,
+			current = t.current,
+			stats = stats[t.id],
+			pr = prs[t.id],
+		})
 	end
-	for _, t in tasks do
-		table.insert(by_column[column_of(t.id)], t)
-	end
-
-	local columns: { Node } = {}
-	for _, c in COLUMNS do
-		local cards: { Node } = {
-			ui.text({ ui.span(c.title, "strong"), ui.span("  " .. #by_column[c.id], "muted num") }),
-		}
-		for _, t in by_column[c.id] do
-			table.insert(cards, task_card(t))
-		end
-		table.insert(columns, ui.el("div", { class = "tk-column" }, cards))
-	end
-
-	local children: { Node } = {
-		ui.el("div", { class = "tk-toolbar" }, {
-			button("+ New task", "new", "primary"),
-			button("↻ Refresh", "refresh"),
-			button("⚙ Settings", "settings"),
-		}),
-	}
-	local main = dashboard_main
-	if main ~= nil then
-		table.insert(children, ui.kv({ { "repository", ui.path(main) } }))
-	end
-	if #tasks == 0 then
-		table.insert(children, ui.md("No open tasks. **New task** starts one."))
-	end
-	table.insert(children, ui.el("div", { class = "tk-board" }, columns))
-	return ui.col(children)
+	return snapshot
 end
 
-local function dashboard_view(cx: WindowCx): Node
-	return board_view(board_tasks(cx))
-end
+local drawn_pane: number? = nil
+local drawn_snapshot: string? = nil
+local legacy_dashboards: { { pane: number, position: number? } } = {}
 
--- What the board shows, as a string: an unchanged board isn't redrawn.
--- Building and sending the view is the costly part of a refresh, and a
--- handler that runs past its 50 ms budget is disabled until reload.
-local function board_signature(tasks: { OpenTask }): string
-	local parts = {}
-	for _, t in tasks do
-		local st: any = stats[t.id]
-		local pr: any = prs[t.id]
-		table.insert(
-			parts,
-			table.concat({
-				tostring(t.id),
-				t.task.name,
-				tostring(t.current),
-				if st == nil then "?" elseif st.missing then "missing" else st.changes .. "," .. st.ahead .. "," .. st.last,
-				if pr == nil then "?" elseif pr == false then "none" else table.concat({ pr.number, pr.state, tostring(pr.draft), pr.review, pr.checks }, ","),
-			}, "|")
-		)
+local function finish_dashboard_migration(cx: WindowCx, pane: number)
+	if #legacy_dashboards == 0 then
+		return
 	end
-	return table.concat(parts, "\n")
+	local tab = cx.session:tab_of(pane)
+	local position = legacy_dashboards[1].position
+	if tab ~= nil and position ~= nil then
+		cx.layout:order_tab(tab, position)
+	end
+	for _, old in legacy_dashboards do
+		cx.layout:close(old.pane)
+	end
+	legacy_dashboards = {}
 end
 
-local drawn_signature: string? = nil
-
-local function render_dashboard(cx: WindowCx, force: boolean?)
+local function render_dashboard(cx: WindowCx, select_repo: boolean?)
 	local pane = dashboard_pane(cx)
 	if pane == nil then
 		return
 	end
-	local tasks = board_tasks(cx)
-	local signature = (dashboard_main or "") .. "\n" .. board_signature(tasks)
-	if not force and signature == drawn_signature then
+	finish_dashboard_migration(cx, pane)
+	if not select_repo then
+		local selection = tern.kv.get(Dashboard.repository_key(pane))
+		if selection ~= nil then
+			dashboard_main = selection.main
+		end
+	end
+	local snapshot = tern.json.encode(dashboard_snapshot(cx))
+	if not select_repo and pane == drawn_pane and snapshot == drawn_snapshot then
 		return
 	end
-	drawn_signature = signature
-	cx.canvas:set(pane, { view = board_view(tasks) })
+	cx.session:event(pane, { ev = "action", id = "main", act = "snapshot", value = snapshot, select = select_repo == true })
+	drawn_pane, drawn_snapshot = pane, snapshot
+end
+
+local function open_dashboard_tab(cx: WindowCx, focus: boolean)
+	-- Daemon-backed launches can be queued and return no id. Discover the
+	-- actual pane from pane_created rather than treating nil as a failure.
+	cx:new_block(DASHBOARD_KIND, { tern.json.encode(dashboard_snapshot(cx)) }, "tab", { focus = focus })
+end
+
+tern.on("pane_created", function(ev: PaneEvent, cx: WindowCx)
+	local pane = cx.session:pane(ev.pane)
+	if pane ~= nil and pane.block == DASHBOARD_KIND then
+		render_dashboard(cx)
+	end
+end)
+
+-- Retire only the old dashboard canvases, once a native dashboard exists.
+-- Settings remain canvases; no other owner's panes are changed.
+local function migrate_dashboard_canvas(cx: WindowCx)
+	local focus = false
+	for _, canvas in cx.canvas:list() do
+		if canvas.owner == tern.plugin.id and canvas.title == "Tasks" then
+			local old = { pane = canvas.pane, position = nil :: number? }
+			local old_tab = cx.session:tab_of(canvas.pane)
+			for i, tab in cx.session:tabs() do
+				if tab.id == old_tab then
+					old.position = i
+					break
+				end
+			end
+			table.insert(legacy_dashboards, old)
+			focus = focus or cx.session:focused() == canvas.pane
+		end
+	end
+	if #legacy_dashboards > 0 then
+		local pane = dashboard_pane(cx)
+		if pane ~= nil then
+			finish_dashboard_migration(cx, pane)
+		else
+			open_dashboard_tab(cx, focus)
+		end
+	end
 end
 
 -- The main checkout of a task whose worktree or main checkout holds cwd,
@@ -504,7 +387,11 @@ local function set_dashboard_repo(cx: WindowCx)
 	if cwd == nil then
 		return -- no directory to go by: keep showing what the board shows
 	end
-	dashboard_main = known_main(cx, cwd)
+	local main = known_main(cx, cwd)
+	if main ~= nil then
+		dashboard_main = main
+		render_dashboard(cx, true)
+	end
 	pcall(
 		tern.process.run,
 		{ "git", "rev-parse", "--path-format=absolute", "--git-common-dir" },
@@ -516,7 +403,7 @@ local function set_dashboard_repo(cx: WindowCx)
 			-- Outside a repository: show every task.
 			local main = if r.status == 0 then (string.gsub(trim(r.stdout), "/%.git$", "")) else nil
 			dashboard_main = main
-			render_dashboard(cx2)
+			render_dashboard(cx2, true)
 		end
 	)
 end
@@ -1305,16 +1192,7 @@ tern.command({
 				cx.layout:focus(pane :: number)
 			end)
 		else
-			local opened, err = cx.canvas:open({
-				title = DASHBOARD_TITLE,
-				about = "Open tasks in this repository (a tab with its own git worktree each). Open switches to a task's tab; Delete closes it and removes its worktree and branch.",
-				view = dashboard_view(cx),
-				how = "tab",
-			})
-			if opened == nil then
-				cx:toast("error", "Could not open the task dashboard", err)
-				return
-			end
+			open_dashboard_tab(cx, true)
 		end
 		refresh_tasks(cx)
 		start_refresh_loop()
@@ -1335,30 +1213,27 @@ tern.command({
 	end,
 })
 
-tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
-	if ev.owner ~= tern.plugin.id then
-		return false
-	end
-	local id = tonumber(ev.value or "")
-	if ev.act == "refresh" then
+local function task_action(act: string, value: string?, cx: WindowCx): boolean
+	local id = tonumber(value or "")
+	if act == "refresh" then
 		refresh_tasks(cx)
-	elseif ev.act == "new" then
+	elseif act == "new" then
 		local cwd: string? = window_cwd(cx) or tern.kv.get("last_main")
 		if cwd == nil then
 			cx:toast("info", "Start the first task with New task from a pane inside the repository")
 		else
 			new_task_from(cx, cwd)
 		end
-	elseif ev.act == "settings" then
+	elseif act == "settings" then
 		local cwd: string? = window_cwd(cx) or tern.kv.get("last_main")
 		if cwd == nil then
 			cx:toast("info", "Run Task settings from a pane inside the repository")
 		else
 			settings_from(cx, cwd)
 		end
-	elseif ev.act == "base_change" and ev.value then
-		choose_base(cx, ev.value :: string)
-	elseif ev.act == "root_change" then
+	elseif act == "base_change" and value then
+		choose_base(cx, value)
+	elseif act == "root_change" then
 		cx:prompt({
 			value = worktree_root(),
 			placeholder = "Folder for task worktrees",
@@ -1379,17 +1254,17 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 			render_settings(cx2)
 			cx2:toast("success", "New tasks' worktrees go in " .. root)
 		end)
-	elseif ev.act == "root_reset" then
+	elseif act == "root_reset" then
 		set_worktree_root(nil)
 		render_settings(cx)
 		cx:toast("success", "New tasks' worktrees go in " .. DEFAULT_WORKTREE_ROOT)
-	elseif ev.act == "base_reset" and ev.value then
-		set_base(ev.value :: string, nil)
+	elseif act == "base_reset" and value then
+		set_base(value, nil)
 		render_settings(cx)
 		cx:toast("success", "New tasks branch from " .. base_label(nil))
-	elseif ev.act == "open" and id ~= nil then
+	elseif act == "open" and id ~= nil then
 		show_tab(cx, id)
-	elseif ev.act == "delete" and id ~= nil then
+	elseif act == "delete" and id ~= nil then
 		local task = read_task(id)
 		if task ~= nil then
 			delete_task(cx, id, task)
@@ -1398,6 +1273,25 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 		return false
 	end
 	return true
+end
+
+tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
+	return ev.owner == tern.plugin.id and task_action(ev.act, ev.value, cx)
+end)
+
+tern.route.link(function(link: LinkRequest, cx: WindowCx): RouteDecision?
+	if string.sub(link.url, 1, #DASHBOARD_LINK_PREFIX) ~= DASHBOARD_LINK_PREFIX or link.pane == nil then
+		return nil
+	end
+	local pane = cx.session:pane(link.pane)
+	if pane == nil or pane.block ~= DASHBOARD_KIND then
+		return nil
+	end
+	local act, value = string.match(string.sub(link.url, #DASHBOARD_LINK_PREFIX + 1), "^([a-z]+)/(%d*)$")
+	if act ~= nil and task_action(act, value, cx) then
+		return { handled = true }
+	end
+	return nil
 end)
 
 -- Close tab and Close session on task tabs remove their worktrees once the
@@ -1462,13 +1356,9 @@ tern.timer(0, function(cx)
 		cx:toast("info", "⌘⇧N now starts a new task")
 	end
 	migrate_session_tasks(cx)
-	-- A board left open (canvases outlive reloads) shows the window's
-	-- repository again.
-	if dashboard_pane(cx) ~= nil then
-		set_dashboard_repo(cx)
-	end
-	-- Keeps the tab names (and a dashboard left open, as canvases outlive
-	-- reloads) up to date. A timer: start the work, draw from its callbacks.
+	migrate_dashboard_canvas(cx)
+	-- Keep tab names and dashboard blocks up to date. A timer starts the
+	-- work; the process callbacks send snapshots to the block renderer.
 	refresh_tasks(cx, true, false)
 	start_refresh_loop()
 	resume_pending_task()

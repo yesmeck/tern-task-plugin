@@ -81,11 +81,12 @@ worktrees are never touched.
 
 ### Task dashboard
 
-A kanban board of the open tasks in the current window's repository, with one column per pull
-request stage. The repository is the one holding the focused pane's directory, or, when the focused
-pane has none (the dashboard itself, for example), that of another pane in the same tab, then in the
-session. Each window's board shows its own repository, and running **Task dashboard** again after
-moving to another repository switches the board to it. Outside any repository it shows every task.
+A native kanban board of the open tasks in the selected repository, with one column per pull
+request stage. Running **Task dashboard** selects the repository holding the focused pane's
+directory, or, when the focused pane has none (the dashboard itself, for example), that of another
+pane in the same tab, then in the session. The selection belongs to the dashboard pane: windows
+mirroring that pane share its filter. Run **Task dashboard** again after moving to another
+repository to switch it. Outside any repository it shows every task.
 
 | In progress | Draft | In review | Done |
 |---|---|---|---|
@@ -104,11 +105,14 @@ if no pane has a directory, in the repository of the last task you started. The 
 set. **↻ Refresh** updates every card immediately, and **⚙ Settings** opens Task settings.
 
 Git state refreshes every 15 seconds and pull requests once a minute. Cards show task details
-immediately; git and PR status appear when available, without loading indicators.
+immediately; git and PR status appear when available, without loading indicators. Stable node keys
+let Tern patch changed cards instead of replacing the dashboard. Known status stays visible while
+fresh status is pending, including after plugin reloads.
 `gh` looks up each task's branch on its own, all in parallel; asking for every PR in one call
 times out on large repositories.
 
-The board is a tab in the session you open it from.
+The board is a native block tab in the session you open it from. Existing dashboard canvases move
+to native blocks automatically; Task settings still uses a canvas.
 
 ### Status in tab names
 
@@ -184,8 +188,8 @@ agent-placement setting says and leaves the shell open.
 - **The 50 ms limit:** Tern gives each plugin handler 50 ms on the UI thread, and a handler that
   runs over is disabled until the plugins reload. So handlers here only read window state and
   start processes. Git, `gh` and the name prompt all run in callbacks. Each dashboard refresh is
-  a single process however many tasks are open, and the board is redrawn only when what it shows
-  has changed.
+  a single process however many tasks are open. Changed snapshots go to a host-side block worker;
+  its keyed view uses Tern's native node diffing, so unchanged cards aren't rebuilt.
 
 ## Limitations
 

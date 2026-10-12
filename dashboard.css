@@ -1,0 +1,18 @@
+.sf-main[data-surface='plugin.worktree-tabs.dashboard'] { line-height: 1.5em; }
+.tk-board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
+.tk-column { flex: 1 1 0; min-width: 260px; display: flex; flex-direction: column; gap: 8px; }
+.tk-toolbar { display: flex; gap: 8px; }
+.tk-actions { display: flex; gap: 6px; }
+/* ui.el buttons come unstyled (class sf-el); give them button chrome. */
+button.tk-btn {
+	padding: 3px 12px;
+	border: 1px solid var(--l2);
+	border-radius: 6px;
+	background: var(--l1);
+	color: var(--t1);
+	cursor: pointer;
+}
+button.tk-btn:hover { background: var(--l2); }
+button.tk-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--page); }
+button.tk-btn.danger { color: var(--bad); }
+button.tk-btn.danger:hover { border-color: var(--bad); }
