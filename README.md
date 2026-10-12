@@ -204,5 +204,5 @@ If a command suddenly stops doing anything, a handler has probably run past its 
 been disabled. Run **Reload plugins** from the palette, then check the log:
 
 ```sh
-grep -E 'worktree-sessions|budget' ~/Library/Logs/tern/tern.log | tail
+grep -E 'worktree-tabs|budget' ~/Library/Logs/tern/tern.log | tail
 ```
