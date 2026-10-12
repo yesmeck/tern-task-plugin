@@ -2,13 +2,14 @@
 -- Tasks: a task is a session with its own git worktree.
 --
 -- New task (palette, cmd+shift+n): asks for a task name, creates a worktree
--- on a new branch named after it (from the focused pane's HEAD) beside the
--- main checkout, and opens a session named after the task running only the
--- default agent (Tern's New agent block) in the worktree.
+-- on a new branch named after it (from the base branch setting, else the
+-- focused pane's HEAD) under the worktree folder setting (default
+-- ~/tern/worktrees), and opens a session named after the task running only
+-- the default agent (Tern's New agent block) in the worktree.
 --
 --   task name:      Fix login redirect
 --   branch:         fix-login-redirect
---   worktree:       ~/workspaces/resvu-platform-agent-fix-login-redirect
+--   worktree:       ~/tern/worktrees/resvu-platform-agent/fix-login-redirect
 --   session:        Fix login redirect
 --
 -- Delete task: the current session's task, or one picked from the open
@@ -169,6 +170,42 @@ local function set_base(main: string, base: string?)
 	local settings = repo_settings(main)
 	settings.base = base
 	tern.kv.set(settings_key(main), settings)
+end
+
+-- Settings for every repository.
+local DEFAULT_WORKTREE_ROOT = "~/tern/worktrees"
+
+type GlobalSettings = {
+	-- Folder holding every task's worktree, as <root>/<repository>/<branch>.
+	worktree_root: string?,
+}
+
+local function global_settings(): GlobalSettings
+	return tern.kv.get("settings") or {}
+end
+
+local function worktree_root(): string
+	return global_settings().worktree_root or DEFAULT_WORKTREE_ROOT
+end
+
+local function set_worktree_root(root: string?)
+	local settings = global_settings()
+	settings.worktree_root = root
+	tern.kv.set("settings", settings)
+end
+
+local function expand_home(path: string): string
+	if path == "~" or string.sub(path, 1, 2) == "~/" then
+		return (tern.getenv("HOME") or "") .. string.sub(path, 2)
+	end
+	return path
+end
+
+-- <root>/<repository>/<branch>, with the branch's slashes as dashes:
+-- ~/tern/worktrees/resvu-platform-agent/fix-login.
+local function task_path(main: string, branch: string): string
+	local repository = string.match(main, "([^/]+)$") or "repository"
+	return expand_home(worktree_root()) .. "/" .. repository .. "/" .. (string.gsub(branch, "/", "-"))
 end
 
 ---------------------------------------------------------------------------
@@ -716,6 +753,7 @@ end
 -- leaves the new branch without an upstream so a push goes to its own name.
 local WORKTREE_ADD_SCRIPT = [[
 branch=$1 path=$2 base=$3
+mkdir -p "$(dirname "$path")" || exit 1
 if [ -z "$base" ]; then
 	exec git worktree add --no-track -b "$branch" "$path"
 fi
@@ -799,9 +837,7 @@ local function ask_task_name(cx: WindowCx, cwd: string, main: string)
 				start_task(cwd, {
 					name = name,
 					branch = branch,
-					-- Beside the main checkout whichever worktree the task was
-					-- started from; fix/login becomes the suffix fix-login.
-					path = main .. "-" .. string.gsub(branch, "/", "-"),
+					path = task_path(main, branch),
 					main = main,
 					base = repo_settings(main).base,
 				})
@@ -853,7 +889,24 @@ local function settings_view(main: string): Node
 	if base then
 		table.insert(actions, button("Use the focused pane's branch", "base_reset=" .. main))
 	end
+	local root = global_settings().worktree_root
+	local root_actions: { Node } = { button("Change…", "root_change", "primary") }
+	if root then
+		table.insert(root_actions, button("Use the default (" .. DEFAULT_WORKTREE_ROOT .. ")", "root_reset"))
+	end
 	return ui.col({
+		ui.rule({ ui.span("All repositories", "muted") }),
+		ui.card({ ui.span("Worktree folder", "strong") }, {
+			ui.text({ ui.span(root or DEFAULT_WORKTREE_ROOT, "code strong") }),
+			ui.text({
+				ui.span(
+					"New tasks' worktrees go in <folder>/<repository>/<branch>. Existing tasks stay where they are.",
+					"muted"
+				),
+			}),
+			ui.el("div", { class = "tk-actions" }, root_actions),
+		}),
+		ui.rule({ ui.span("This repository", "muted") }),
 		ui.kv({ { "repository", ui.path(main) } }),
 		ui.card({ ui.span("Base branch for new tasks", "strong") }, {
 			ui.text({
@@ -1076,6 +1129,31 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 		end
 	elseif ev.act == "base_change" and ev.value then
 		choose_base(cx, ev.value :: string)
+	elseif ev.act == "root_change" then
+		cx:prompt({
+			value = worktree_root(),
+			placeholder = "Folder for task worktrees",
+			action = "save",
+		}):next(function(answer, _err, cx2)
+			if cx2 == nil or answer == nil then
+				return
+			end
+			local root = string.gsub(trim(answer), "(.)/+$", "%1")
+			if root == "" then
+				return
+			end
+			if string.sub(root, 1, 1) ~= "/" and string.sub(root, 1, 1) ~= "~" then
+				cx2:toast("error", "Use an absolute path or one starting with ~", root)
+				return
+			end
+			set_worktree_root(if root == DEFAULT_WORKTREE_ROOT then nil else root)
+			render_settings(cx2)
+			cx2:toast("success", "New tasks' worktrees go in " .. root)
+		end)
+	elseif ev.act == "root_reset" then
+		set_worktree_root(nil)
+		render_settings(cx)
+		cx:toast("success", "New tasks' worktrees go in " .. DEFAULT_WORKTREE_ROOT)
 	elseif ev.act == "base_reset" and ev.value then
 		set_base(ev.value :: string, nil)
 		render_settings(cx)

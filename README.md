@@ -2,7 +2,7 @@
 
 A [Tern](https://stencil.so/tern) plugin where **a task is a session with its own git worktree**.
 
-Start a task and you get a fresh branch, a worktree for it next to your main checkout, and a
+Start a task and you get a fresh branch, a worktree for it in one central folder, and a
 Tern session running your default agent inside that worktree. Delete the task and the session,
 worktree and branch go away together, but git refuses to delete anything that holds work you
 haven't committed or merged.
@@ -10,7 +10,7 @@ haven't committed or merged.
 ```
 task name:  Fix login redirect
 branch:     fix-login-redirect
-worktree:   ~/code/my-repo-fix-login-redirect
+worktree:   ~/tern/worktrees/my-repo/fix-login-redirect
 session:    Fix login redirect  (running the default agent)
 ```
 
@@ -50,9 +50,10 @@ Run it from a pane inside a git repository. It:
 1. Asks for a task name. The branch name is derived from it: lowercased, with runs of other
    characters turned into `-`. Slashes are kept, so `feat/Login page` becomes `feat/login-page`.
 2. Creates the branch from the repository's [base branch](#task-settings) setting, or from the
-   focused pane's `HEAD` when no base branch is set. It then adds a worktree for the branch beside
-   the main checkout: `<main checkout>-<branch>`, with `/` replaced by `-`. The worktree goes next
-   to the main checkout even when you start the task from inside another worktree.
+   focused pane's `HEAD` when no base branch is set. It then adds a worktree for the branch at
+   `<worktree folder>/<repository>/<branch>`, with `/` in the branch replaced by `-`. The
+   [worktree folder](#task-settings) defaults to `~/tern/worktrees`, and `<repository>` is the
+   main checkout's folder name, even when you start the task from inside another worktree.
 3. Opens a session named after the task, running your default agent (Tern's **New agent block**)
    in the worktree.
 
@@ -129,10 +130,14 @@ renames the task, and the status is added back after the new name. To turn the s
 
 ### Task settings
 
-A settings screen for the focused pane's repository. Settings are saved separately for each
-repository.
+A settings screen with one setting that applies to all repositories, then the focused pane's
+repository's own settings.
 
-- **Base branch for new tasks:** the branch a new task starts from, for example `origin/cycle-86`.
+- **Worktree folder** (all repositories): where new tasks' worktrees go, as
+  `<folder>/<repository>/<branch>`. The default is `~/tern/worktrees`. **Change…** opens a field
+  for an absolute path or one starting with `~`; missing folders are created when a task starts.
+  Moving the folder doesn't move existing tasks, which stay where they were created.
+- **Base branch for new tasks** (per repository): the branch a new task starts from, for example `origin/cycle-86`.
   **Change…** lists the repository's remote and local branches, most recently committed first.
   **Use the focused pane's branch** clears the setting.
   - **Remote branches** (`origin/…`) are fetched before the task's branch is created, so the task
@@ -142,7 +147,7 @@ repository.
     under its own name.
 
 The screen is a canvas, and Tern doesn't allow typing in a canvas, so each setting has a
-**Change…** button that opens Tern's picker.
+**Change…** button that opens Tern's picker or a text prompt.
 
 ## Configuration
 
