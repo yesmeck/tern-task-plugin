@@ -40,6 +40,21 @@ tern.css(
 	[[
 .tk-board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
 .tk-column { flex: 1 1 0; min-width: 260px; display: flex; flex-direction: column; gap: 8px; }
+.tk-toolbar { display: flex; gap: 8px; }
+.tk-actions { display: flex; gap: 6px; }
+/* ui.el buttons come unstyled (class sf-el); give them button chrome. */
+button.tk-btn {
+	padding: 3px 12px;
+	border: 1px solid var(--l2);
+	border-radius: 6px;
+	background: var(--l1);
+	color: var(--t1);
+	cursor: pointer;
+}
+button.tk-btn:hover { background: var(--l2); }
+button.tk-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--page); }
+button.tk-btn.danger { color: var(--bad); }
+button.tk-btn.danger:hover { border-color: var(--bad); }
 ]]
 )
 
@@ -136,7 +151,9 @@ local function dashboard_pane(cx: WindowCx): number?
 	return nil
 end
 
-local function button(text: string, act: string, class: string?): Node
+-- variant: "primary" or "danger" (see the board CSS).
+local function button(text: string, act: string, variant: string?): Node
+	local class = if variant then "tk-btn " .. variant else "tk-btn"
 	return ui.el("button", { class = class, text = text, actions = { click = act } })
 end
 
@@ -234,7 +251,7 @@ local function task_card(t: OpenTask): Node
 	)
 	table.insert(
 		body,
-		ui.row({
+		ui.el("div", { class = "tk-actions" }, {
 			button("Open", "open=" .. tostring(t.id)),
 			button("Delete", "delete=" .. tostring(t.id), "danger"),
 		})
@@ -264,7 +281,10 @@ local function dashboard_view(cx: WindowCx): Node
 	end
 
 	local children: { Node } = {
-		ui.row({ button("New task", "new"), button("Refresh", "refresh") }),
+		ui.el("div", { class = "tk-toolbar" }, {
+			button("+ New task", "new", "primary"),
+			button("↻ Refresh", "refresh"),
+		}),
 	}
 	if #tasks == 0 then
 		table.insert(children, ui.md("No open tasks. **New task** starts one."))
