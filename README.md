@@ -93,8 +93,8 @@ Each card shows:
 - the branch and the worktree path
 - **Open** (switch to the task's session) and **Delete** buttons
 
-**+ New task** on the board starts a task in the repository of the last task you started. The
-branch comes from the base branch setting, or from the repository's default branch if none is
+**+ New task** on the board starts a task in the repository of another pane in the session, or,
+if no pane has a directory, in the repository of the last task you started. The branch comes from the base branch setting, or from the repository's default branch if none is
 set. **↻ Refresh** updates every card immediately, and **⚙ Settings** opens Task settings.
 
 Git state refreshes every 15 seconds and pull requests once a minute.
@@ -131,7 +131,8 @@ renames the task, and the status is added back after the new name. To turn the s
 ### Task settings
 
 A settings screen with one setting that applies to all repositories, then the focused pane's
-repository's own settings.
+repository's own settings. When the focused pane has no directory (the dashboard, for example), the
+repository is that of another pane in the session.
 
 - **Worktree folder** (all repositories): where new tasks' worktrees go, as
   `<folder>/<repository>/<branch>`. The default is `~/tern/worktrees`. **Change…** opens a field

@@ -134,6 +134,21 @@ local function focused_cwd(cx: WindowCx): string?
 	return nil
 end
 
+-- The focused pane's directory, or else the first pane in this session with
+-- one: canvas panes such as the dashboard have no directory.
+local function window_cwd(cx: WindowCx): string?
+	local cwd = focused_cwd(cx)
+	if cwd ~= nil then
+		return cwd
+	end
+	for _, pane in cx.session:panes() do
+		if pane.cwd ~= "" then
+			return pane.cwd
+		end
+	end
+	return nil
+end
+
 local function trim(s: string): string
 	return (string.gsub(string.gsub(s, "^%s+", ""), "%s+$", ""))
 end
@@ -1133,7 +1148,7 @@ tern.command({
 	title = "Task settings",
 	group = "Tasks",
 	run = function(cx)
-		local cwd = focused_cwd(cx) or tern.kv.get("last_main")
+		local cwd = window_cwd(cx) or tern.kv.get("last_main")
 		if cwd == nil then
 			cx:toast("error", "Task settings need a pane inside a git repository")
 			return
@@ -1150,18 +1165,18 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 	if ev.act == "refresh" then
 		refresh_tasks(cx)
 	elseif ev.act == "new" then
-		local main: string? = tern.kv.get("last_main")
-		if main == nil then
+		local cwd: string? = window_cwd(cx) or tern.kv.get("last_main")
+		if cwd == nil then
 			cx:toast("info", "Start the first task with New task from a pane inside the repository")
 		else
-			new_task_from(cx, main)
+			new_task_from(cx, cwd)
 		end
 	elseif ev.act == "settings" then
-		local main: string? = tern.kv.get("last_main")
-		if main == nil then
+		local cwd: string? = window_cwd(cx) or tern.kv.get("last_main")
+		if cwd == nil then
 			cx:toast("info", "Run Task settings from a pane inside the repository")
 		else
-			open_settings(cx, main)
+			settings_from(cx, cwd)
 		end
 	elseif ev.act == "base_change" and ev.value then
 		choose_base(cx, ev.value :: string)
