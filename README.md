@@ -103,7 +103,8 @@ Each card shows:
 if no pane has a directory, in the repository of the last task you started. The branch comes from the base branch setting, or from the repository's default branch if none is
 set. **↻ Refresh** updates every card immediately, and **⚙ Settings** opens Task settings.
 
-Git state refreshes every 15 seconds and pull requests once a minute.
+Git state refreshes every 15 seconds and pull requests once a minute. Cards show task details
+immediately; git and PR status appear when available, without loading indicators.
 `gh` looks up each task's branch on its own, all in parallel; asking for every PR in one call
 times out on large repositories.
 
