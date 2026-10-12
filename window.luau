@@ -22,11 +22,15 @@
 -- kept and a toast says why. Other sessions close as usual, and New session
 -- is Tern's own.
 --
+-- Session names: each task's session is named "<task> · <status>", e.g.
+-- "Fix login · #3413 ✓ · ±2" (PR, checks, uncommitted files), kept up to
+-- date in the background.
+--
 -- Task dashboard: a kanban canvas of the open tasks, in columns by pull
 -- request (In progress: none yet, Draft, In review, Done: merged or closed),
 -- each card with its git state, PR checks and review, and Open / Delete
--- buttons. It refreshes itself while open: git every 15 s, GitHub (gh)
--- every minute.
+-- buttons. Task state refreshes in the background: git every 15 s, GitHub
+-- (gh) every minute.
 --
 -- Window handlers run on the UI thread under a 50 ms budget, and one overrun
 -- disables the handler until the plugins reload. So handlers only read
@@ -67,6 +71,8 @@ local DASHBOARD_TITLE = "Tasks"
 local DASHBOARD_REFRESH_MS = 15000
 -- Start the default agent in a new task's session.
 local OPEN_AGENT = true
+-- Append each task's status to its session name ("Fix login · #3413 ✓ · ±2").
+local STATUS_IN_SESSION_NAMES = true
 -- Pull requests every 4th refresh (once a minute), as GitHub rate-limits.
 local PR_REFRESH_EVERY = 4
 
@@ -361,6 +367,70 @@ local function render_dashboard(cx: WindowCx, force: boolean?)
 	cx.canvas:set(pane, { view = board_view(tasks) })
 end
 
+---------------------------------------------------------------------------
+-- Status in session names
+
+local NAME_SEPARATOR = " · "
+local CHECK_MARKS = { pass = "✓", fail = "✗", pending = "●" }
+
+-- " · #3413 draft ✓ · ±2": the PR (number, draft, checks; merged or closed
+-- instead once it's done), then uncommitted files. "" when there's nothing
+-- to say.
+local function status_suffix(id: number): string
+	local parts = {}
+	local pr: any = prs[id]
+	if pr then
+		local label = "#" .. pr.number
+		if pr.state == "MERGED" or pr.state == "CLOSED" then
+			label ..= " " .. string.lower(pr.state)
+		else
+			if pr.draft then
+				label ..= " draft"
+			end
+			local mark = CHECK_MARKS[pr.checks]
+			if mark then
+				label ..= " " .. mark
+			end
+		end
+		table.insert(parts, label)
+	end
+	local st: any = stats[id]
+	if st and st.missing then
+		table.insert(parts, "worktree missing")
+	elseif st and st.changes > 0 then
+		table.insert(parts, "±" .. st.changes)
+	end
+	if #parts == 0 then
+		return ""
+	end
+	return NAME_SEPARATOR .. table.concat(parts, NAME_SEPARATOR)
+end
+
+-- Renames each task's session to "<task name><status suffix>", only when
+-- that changes it. The part before the first separator is the task's name,
+-- so renaming a session by hand renames its task.
+local function apply_session_names(cx: WindowCx)
+	if not STATUS_IN_SESSION_NAMES then
+		return
+	end
+	for _, s in cx.sessions:list() do
+		local task = read_task(s.id)
+		-- Wait for both answers, so a reload doesn't strip the suffix and
+		-- put it back a moment later.
+		if task ~= nil and stats[s.id] ~= nil and prs[s.id] ~= nil then
+			local base = string.match(s.name, "^(.-)" .. NAME_SEPARATOR) or s.name
+			if base ~= "" and base ~= task.name then
+				task.name = base
+				tern.kv.set(kv_key(s.id), task)
+			end
+			local wanted = task.name .. status_suffix(s.id)
+			if s.name ~= wanted then
+				cx.sessions:rename(s.id, wanted)
+			end
+		end
+	end
+end
+
 local function task_args(cx: WindowCx, fields: (Task) -> { string }): { string }
 	local args = {}
 	for _, t in open_tasks(cx) do
@@ -455,6 +525,7 @@ local function refresh_stats(cx: WindowCx)
 			end
 		end
 		render_dashboard(cx2)
+		apply_session_names(cx2)
 	end)
 end
 
@@ -491,16 +562,16 @@ local function refresh_prs(cx: WindowCx)
 			end
 		end
 		render_dashboard(cx2)
+		apply_session_names(cx2)
 	end)
 end
 
--- with_prs: also ask GitHub, which is slower and rate-limited, so the
--- refresh loop does it only every few ticks. redraw: false leaves drawing
--- to the process callbacks (the refresh loop's timer only starts work).
-local function refresh_dashboard(cx: WindowCx, with_prs: boolean?, redraw: boolean?)
-	if dashboard_pane(cx) == nil then
-		return
-	end
+-- Refreshes every task's git and PR state, for the dashboard and the
+-- session names. with_prs: also ask GitHub, which is slower and
+-- rate-limited, so the refresh loop does it only every few ticks. redraw:
+-- false leaves drawing to the process callbacks (the refresh loop's timer
+-- only starts work).
+local function refresh_tasks(cx: WindowCx, with_prs: boolean?, redraw: boolean?)
 	if redraw ~= false then
 		render_dashboard(cx)
 	end
@@ -520,12 +591,12 @@ local function start_refresh_loop()
 	local ticks = 0
 	local function tick()
 		tern.timer(DASHBOARD_REFRESH_MS, function(cx)
-			if cx == nil or dashboard_pane(cx) == nil then
+			if cx == nil then
 				refresh_loop_running = false
 				return
 			end
 			ticks += 1
-			refresh_dashboard(cx, ticks % PR_REFRESH_EVERY == 0, false)
+			refresh_tasks(cx, ticks % PR_REFRESH_EVERY == 0, false)
 			tick()
 		end)
 	end
@@ -545,7 +616,7 @@ local function remove_worktree(task: Task)
 			end
 			if r.status ~= 0 then
 				cx:toast("error", "Kept worktree for " .. task.name, trim(r.stderr))
-				refresh_dashboard(cx)
+				refresh_tasks(cx)
 				return
 			end
 			tern.process.run(
@@ -560,7 +631,7 @@ local function remove_worktree(task: Task)
 					else
 						cx2:toast("success", "Task closed: " .. task.name, "removed " .. task.path)
 					end
-					refresh_dashboard(cx2)
+					refresh_tasks(cx2)
 				end
 			)
 		end
@@ -674,7 +745,7 @@ local function start_task(cwd: string, task: Task)
 			tern.kv.set(kv_key(session.id), task)
 			tern.kv.set("last_main", task.main)
 			cx:toast("success", "Task started: " .. task.name, task.path)
-			refresh_dashboard(cx)
+			refresh_tasks(cx)
 			if OPEN_AGENT then
 				-- Tern's own New agent block: the default agent, in the focused
 				-- pane's directory (the new session's first pane, in the
@@ -963,7 +1034,7 @@ tern.command({
 				return
 			end
 		end
-		refresh_dashboard(cx)
+		refresh_tasks(cx)
 		start_refresh_loop()
 	end,
 })
@@ -988,7 +1059,7 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 	end
 	local id = tonumber(ev.value or "")
 	if ev.act == "refresh" then
-		refresh_dashboard(cx)
+		refresh_tasks(cx)
 	elseif ev.act == "new" then
 		local main: string? = tern.kv.get("last_main")
 		if main == nil then
@@ -1049,9 +1120,8 @@ tern.timer(0, function(cx)
 		tern.kv.set("new_task_bound", true)
 		cx:toast("info", "⌘⇧N now starts a new task")
 	end
-	-- Canvases outlive plugin reloads; pick a dashboard left open back up.
-	if dashboard_pane(cx) ~= nil then
-		refresh_dashboard(cx, true, false) -- a timer: start the work, draw from its callbacks
-		start_refresh_loop()
-	end
+	-- Keeps the session names (and a dashboard left open, as canvases outlive
+	-- reloads) up to date. A timer: start the work, draw from its callbacks.
+	refresh_tasks(cx, true, false)
+	start_refresh_loop()
 end)

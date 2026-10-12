@@ -96,12 +96,36 @@ Each card shows:
 branch comes from the base branch setting, or from the main checkout's current branch if none is
 set. **↻ Refresh** updates every card immediately, and **⚙ Settings** opens Task settings.
 
-While the board is open, git state refreshes every 15 seconds and pull requests once a minute.
+Git state refreshes every 15 seconds and pull requests once a minute.
 `gh` looks up each task's branch on its own, all in parallel; asking for every PR in one call
 times out on large repositories.
 
 The board is a tab in the session you open it from. Open it from a session that isn't a task, or
 deleting that task closes the board too.
+
+### Status in session names
+
+Each task's session name shows its status after the task name, so the session list doubles as an
+overview:
+
+```
+Fix login redirect · #3413 ✓ · ±2
+Add CSV export · #3518 draft ●
+Old idea · #3301 merged
+hello task
+```
+
+- **PR:** the number, `draft` for a draft, then CI checks: `✓` passing, `✗` failing, `●` running.
+  `merged` or `closed` replaces the checks once the PR is done.
+- **`±N`:** uncommitted files in the worktree.
+- **`worktree missing`:** the worktree folder is gone.
+
+Names update in the background, git every 15 seconds and PRs once a minute, whether or not the
+dashboard is open. A session is renamed only when its status changes.
+
+The part of the name before the first ` · ` is the task's name. Renaming a task's session by hand
+renames the task, and the status is added back after the new name. To turn the status off, set
+`STATUS_IN_SESSION_NAMES = false` in `window.luau`.
 
 ### Task settings
 
@@ -128,7 +152,8 @@ changed:
 | Constant | Default | |
 |---|---|---|
 | `OPEN_AGENT` | `true` | Start the default agent in a new task's session, with no shell pane |
-| `DASHBOARD_REFRESH_MS` | `15000` | How often the board refreshes git state |
+| `STATUS_IN_SESSION_NAMES` | `true` | Show each task's status after its session name |
+| `DASHBOARD_REFRESH_MS` | `15000` | How often task git state refreshes |
 | `PR_REFRESH_EVERY` | `4` | Fetch pull requests every Nth refresh |
 
 The agent is whatever Tern's agent settings name (`omp` by default). Where it opens follows
