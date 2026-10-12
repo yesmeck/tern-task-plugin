@@ -5,7 +5,7 @@
 -- on a new branch named after it (from the base branch setting, else the
 -- repository's default branch) under the worktree folder setting (default
 -- ~/tern/worktrees), and opens a session named after the task running only
--- the default agent (Tern's New agent block) in the worktree.
+-- the default agent in the worktree.
 --
 --   task name:      Fix login redirect
 --   branch:         fix-login-redirect
@@ -20,7 +20,8 @@
 -- Close session on a task's session: once it has closed, removes the
 -- worktree and deletes the branch. git refuses both when they would lose work
 -- (uncommitted changes, unmerged commits); the worktree or branch is then
--- kept and a toast says why. Other sessions close as usual, and New session
+-- kept and a toast says why. A task session Tern closes because its last
+-- pane exited keeps both. Other sessions close as usual, and New session
 -- is Tern's own.
 --
 -- Session names: each task's session is named "<task> · <status>", e.g.
@@ -801,11 +802,47 @@ local function base_label(base: string?): string
 	return base
 end
 
+-- Opens the session for a task whose worktree is ready, with the agent in it.
+local function open_task_session(cx: WindowCx, task: Task)
+	local session = cx.sessions:create({ name = task.name, cwd = task.path })
+	tern.kv.set(kv_key(session.id), task)
+	tern.kv.set("last_main", task.main)
+	cx:toast("success", "Task started: " .. task.name, task.path)
+	refresh_tasks(cx)
+	if OPEN_AGENT then
+		-- The default agent in the worktree, taking the place of the new
+		-- session's lone shell; Tern does the replacing, as closing the shell
+		-- from here could leave the session empty, and an empty task session
+		-- counts as closed, removing the worktree. Failing that, Tern's own
+		-- New agent block beside the shell. Last, so little runs after the
+		-- heaviest step.
+		local started = pcall(function()
+			cx.agents:start({ prompt = "", cwd = task.path, how = "replace_if_alone" })
+		end)
+		if not started then
+			cx:command("new_agent_block")
+		end
+	end
+end
+
+-- The task whose worktree is being created, kept until its session opens: a
+-- reload drops the callback of the process creating it (a linked plugin
+-- reloads on any change in its folder, .git included, so a task started in
+-- the plugin's own repository always reloads it), and the next load finishes
+-- the task from this record.
+local PENDING_KEY = "pending_task"
+-- Give up on a pending task after this many seconds, or sooner when its
+-- worktree never shows up.
+local PENDING_MAX_S = 300
+local PENDING_MISSING_S = 30
+
 local function start_task(cwd: string, task: Task)
+	tern.kv.set(PENDING_KEY, { task = task, since = os.time() })
 	tern.process.run(
 		{ "sh", "-c", WORKTREE_ADD_SCRIPT, "sh", task.branch, task.path, task.base or "" },
 		{ cwd = cwd, timeout_ms = 120000 },
 		function(r, cx)
+			tern.kv.set(PENDING_KEY, nil)
 			if cx == nil then
 				return
 			end
@@ -817,25 +854,56 @@ local function start_task(cwd: string, task: Task)
 			-- dashboard compares with the main checkout's branch.
 			local used = trim(r.stdout)
 			task.base = if used ~= "" and used ~= "HEAD" then used else nil
-			local session = cx.sessions:create({ name = task.name, cwd = task.path })
-			tern.kv.set(kv_key(session.id), task)
-			tern.kv.set("last_main", task.main)
-			cx:toast("success", "Task started: " .. task.name, task.path)
-			refresh_tasks(cx)
-			if OPEN_AGENT then
-				-- Tern's own New agent block: the default agent, in the focused
-				-- pane's directory (the new session's first pane, in the
-				-- worktree). Then close that shell so the session holds only
-				-- the agent; with agent placement set to replace an idle shell
-				-- it is already gone. Last, so little runs after the heaviest
-				-- step.
-				local shell = cx.session:focused()
-				cx:command("new_agent_block")
-				if shell ~= nil and cx.session:focused() ~= shell then
-					pcall(function()
-						cx.layout:close(shell :: number)
-					end)
+			open_task_session(cx, task)
+		end
+	)
+end
+
+-- After a load: finishes a task whose worktree was being created when the
+-- plugin reloaded. git locks a new worktree ("initializing") until its
+-- checkout is done, so this waits for it to be listed unlocked.
+local function resume_pending_task()
+	local pending: any = tern.kv.get(PENDING_KEY)
+	if pending == nil then
+		return
+	end
+	local task: Task = pending.task
+	local age = os.time() - pending.since
+	if age > PENDING_MAX_S then
+		tern.kv.set(PENDING_KEY, nil)
+		return
+	end
+	tern.process.run(
+		{ "git", "worktree", "list", "--porcelain" },
+		{ cwd = task.main, timeout_ms = 10000 },
+		function(r, cx)
+			if cx == nil or tern.kv.get(PENDING_KEY) == nil then
+				return
+			end
+			-- Porcelain: a "worktree <path>" line starts each worktree's
+			-- lines, "locked [reason]" among them while it's locked.
+			local listed, locked, current = false, false, nil
+			for _, line in string.split(r.stdout, "\n") do
+				local path = string.match(line, "^worktree (.+)$")
+				if path ~= nil then
+					current = path
+					listed = listed or path == task.path
+				elseif current == task.path and string.match(line, "^locked") then
+					locked = true
 				end
+			end
+			if listed and not locked then
+				tern.kv.set(PENDING_KEY, nil)
+				-- The base the script resolved is lost with its output; a
+				-- requested base is the same, and none compares with HEAD.
+				open_task_session(cx, task)
+			elseif not listed and age > PENDING_MISSING_S then
+				tern.kv.set(PENDING_KEY, nil)
+				cx:toast("error", "Could not create the task's worktree", task.path)
+			else
+				tern.timer(1000, function()
+					resume_pending_task()
+				end)
 			end
 		end
 	)
@@ -1225,7 +1293,11 @@ end)
 tern.override("close_session", function(cx)
 	local session = cx.sessions:current()
 	local task = read_task(session.id)
-	if task ~= nil and not session.locked then
+	if task ~= nil and session.tabs == 0 then
+		-- Tern closing a session its last pane left empty, not you closing
+		-- it: keep the worktree and branch, and forget the task.
+		tern.kv.set(kv_key(session.id), nil)
+	elseif task ~= nil and not session.locked then
 		await_close(session.id, task, CLOSE_POLL_TRIES)
 	end
 	return false -- Tern's own Close session runs, confirmation included
@@ -1253,4 +1325,5 @@ tern.timer(0, function(cx)
 	-- reloads) up to date. A timer: start the work, draw from its callbacks.
 	refresh_tasks(cx, true, false)
 	start_refresh_loop()
+	resume_pending_task()
 end)
