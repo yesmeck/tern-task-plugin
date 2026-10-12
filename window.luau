@@ -70,7 +70,8 @@ local OPEN_AGENT = true
 -- Pull requests every 4th refresh (once a minute), as GitHub rate-limits.
 local PR_REFRESH_EVERY = 4
 
-type Task = { name: string, branch: string, path: string, main: string }
+-- base: the ref the branch was created from (nil: the starting pane's HEAD).
+type Task = { name: string, branch: string, path: string, main: string, base: string? }
 type OpenTask = { id: number, task: Task, current: boolean }
 -- Git state of a task's worktree, as the dashboard shows it.
 type Stats = { changes: number, ahead: number, last: string } | { missing: true }
@@ -139,6 +140,29 @@ local function slug(name: string): string
 	s = string.gsub(s, "^[-./]+", "")
 	s = string.gsub(s, "[-./]+$", "")
 	return s
+end
+
+---------------------------------------------------------------------------
+-- Settings, per repository (keyed by the main checkout's path)
+
+type RepoSettings = {
+	-- Ref new tasks branch from, e.g. "origin/cycle-86"; nil: the focused
+	-- pane's current branch.
+	base: string?,
+}
+
+local function settings_key(main: string): string
+	return "settings:" .. main
+end
+
+local function repo_settings(main: string): RepoSettings
+	return tern.kv.get(settings_key(main)) or {}
+end
+
+local function set_base(main: string, base: string?)
+	local settings = repo_settings(main)
+	settings.base = base
+	tern.kv.set(settings_key(main), settings)
 end
 
 ---------------------------------------------------------------------------
@@ -261,12 +285,11 @@ local function task_card(t: OpenTask): Node
 	return ui.card({ ui.span(t.task.name, "strong") }, body)
 end
 
-local function dashboard_view(cx: WindowCx): Node
+local function board_view(tasks: { OpenTask }): Node
 	local by_column: { [string]: { OpenTask } } = {}
 	for _, c in COLUMNS do
 		by_column[c.id] = {}
 	end
-	local tasks = open_tasks(cx)
 	for _, t in tasks do
 		table.insert(by_column[column_of(t.id)], t)
 	end
@@ -286,6 +309,7 @@ local function dashboard_view(cx: WindowCx): Node
 		ui.el("div", { class = "tk-toolbar" }, {
 			button("+ New task", "new", "primary"),
 			button("↻ Refresh", "refresh"),
+			button("⚙ Settings", "settings"),
 		}),
 	}
 	if #tasks == 0 then
@@ -295,11 +319,46 @@ local function dashboard_view(cx: WindowCx): Node
 	return ui.col(children)
 end
 
-local function render_dashboard(cx: WindowCx)
-	local pane = dashboard_pane(cx)
-	if pane ~= nil then
-		cx.canvas:set(pane, { view = dashboard_view(cx) })
+local function dashboard_view(cx: WindowCx): Node
+	return board_view(open_tasks(cx))
+end
+
+-- What the board shows, as a string: an unchanged board isn't redrawn.
+-- Building and sending the view is the costly part of a refresh, and a
+-- handler that runs past its 50 ms budget is disabled until reload.
+local function board_signature(tasks: { OpenTask }): string
+	local parts = {}
+	for _, t in tasks do
+		local st: any = stats[t.id]
+		local pr: any = prs[t.id]
+		table.insert(
+			parts,
+			table.concat({
+				tostring(t.id),
+				t.task.name,
+				tostring(t.current),
+				if st == nil then "?" elseif st.missing then "missing" else st.changes .. "," .. st.ahead .. "," .. st.last,
+				if pr == nil then "?" elseif pr == false then "none" else table.concat({ pr.number, pr.state, tostring(pr.draft), pr.review, pr.checks }, ","),
+			}, "|")
+		)
 	end
+	return table.concat(parts, "\n")
+end
+
+local drawn_signature: string? = nil
+
+local function render_dashboard(cx: WindowCx, force: boolean?)
+	local pane = dashboard_pane(cx)
+	if pane == nil then
+		return
+	end
+	local tasks = open_tasks(cx)
+	local signature = board_signature(tasks)
+	if not force and signature == drawn_signature then
+		return
+	end
+	drawn_signature = signature
+	cx.canvas:set(pane, { view = board_view(tasks) })
 end
 
 local function task_args(cx: WindowCx, fields: (Task) -> { string }): { string }
@@ -314,16 +373,17 @@ local function task_args(cx: WindowCx, fields: (Task) -> { string }): { string }
 end
 
 -- One process for every task, so a refresh spawns once however many tasks
--- are open. Arguments come in (id, path, main, branch) groups; each prints
---   id<TAB>uncommitted files<TAB>commits not in main's HEAD<TAB>last commit age
+-- are open. Arguments come in (id, path, main, branch, base) groups; each
+-- prints
+--   id<TAB>uncommitted files<TAB>commits not in base<TAB>last commit age
 -- or "id<TAB>missing" when the worktree is gone.
 local STATS_SCRIPT = [[
-while [ $# -ge 4 ]; do
-	id=$1 path=$2 main=$3 branch=$4
-	shift 4
+while [ $# -ge 5 ]; do
+	id=$1 path=$2 main=$3 branch=$4 base=$5
+	shift 5
 	if [ -d "$path" ]; then
 		changes=$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-		ahead=$(git -C "$main" rev-list --count "HEAD..$branch" 2>/dev/null || echo 0)
+		ahead=$(git -C "$main" rev-list --count "$base..$branch" 2>/dev/null || echo 0)
 		last=$(git -C "$path" log -1 --format=%cr 2>/dev/null)
 		printf '%s\t%s\t%s\t%s\n' "$id" "$changes" "$ahead" "$last"
 	else
@@ -371,7 +431,8 @@ wait
 
 local function refresh_stats(cx: WindowCx)
 	local args = task_args(cx, function(task)
-		return { task.path, task.main, task.branch }
+		-- Tasks without a recorded base compare with the main checkout's HEAD.
+		return { task.path, task.main, task.branch, task.base or "HEAD" }
 	end)
 	if #args == 0 then
 		return
@@ -434,12 +495,15 @@ local function refresh_prs(cx: WindowCx)
 end
 
 -- with_prs: also ask GitHub, which is slower and rate-limited, so the
--- refresh loop does it only every few ticks.
-local function refresh_dashboard(cx: WindowCx, with_prs: boolean?)
+-- refresh loop does it only every few ticks. redraw: false leaves drawing
+-- to the process callbacks (the refresh loop's timer only starts work).
+local function refresh_dashboard(cx: WindowCx, with_prs: boolean?, redraw: boolean?)
 	if dashboard_pane(cx) == nil then
 		return
 	end
-	render_dashboard(cx)
+	if redraw ~= false then
+		render_dashboard(cx)
+	end
 	refresh_stats(cx)
 	if with_prs ~= false then
 		refresh_prs(cx)
@@ -461,7 +525,7 @@ local function start_refresh_loop()
 				return
 			end
 			ticks += 1
-			refresh_dashboard(cx, ticks % PR_REFRESH_EVERY == 0)
+			refresh_dashboard(cx, ticks % PR_REFRESH_EVERY == 0, false)
 			tick()
 		end)
 	end
@@ -576,10 +640,28 @@ end
 ---------------------------------------------------------------------------
 -- Starting a task
 
+-- Creates the branch and worktree. From a remote-tracking base (origin/…),
+-- fetches that branch first so the task starts from its latest commit, and
+-- leaves the new branch without an upstream so a push goes to its own name.
+local WORKTREE_ADD_SCRIPT = [[
+branch=$1 path=$2 base=$3
+if [ -z "$base" ]; then
+	exec git worktree add --no-track -b "$branch" "$path"
+fi
+full=$(git rev-parse --symbolic-full-name "$base" 2>/dev/null)
+case "$full" in
+refs/remotes/*)
+	rest=${full#refs/remotes/}
+	git fetch --quiet "${rest%%/*}" "${rest#*/}" || echo "could not fetch $base; using the local copy" >&2
+	;;
+esac
+exec git worktree add --no-track -b "$branch" "$path" "$base"
+]]
+
 local function start_task(cwd: string, task: Task)
 	tern.process.run(
-		{ "git", "worktree", "add", "-b", task.branch, task.path },
-		{ cwd = cwd, timeout_ms = 60000 },
+		{ "sh", "-c", WORKTREE_ADD_SCRIPT, "sh", task.branch, task.path, task.base or "" },
+		{ cwd = cwd, timeout_ms = 120000 },
 		function(r, cx)
 			if cx == nil then
 				return
@@ -641,7 +723,8 @@ local function ask_task_name(cx: WindowCx, cwd: string, main: string)
 					cx3:toast("error", "Task name doesn't make a valid branch name", branch)
 					return
 				end
-				cx3:toast("info", "Starting task " .. name .. "…", branch)
+				local base = repo_settings(main).base
+				cx3:toast("info", "Starting task " .. name .. "…", if base then branch .. " from " .. base else branch)
 				start_task(cwd, {
 					name = name,
 					branch = branch,
@@ -649,6 +732,7 @@ local function ask_task_name(cx: WindowCx, cwd: string, main: string)
 					-- started from; fix/login becomes the suffix fix-login.
 					path = main .. "-" .. string.gsub(branch, "/", "-"),
 					main = main,
+					base = repo_settings(main).base,
 				})
 			end
 		)
@@ -671,6 +755,139 @@ local function new_task_from(cx: WindowCx, cwd: string)
 			end
 			-- <main>/.git -> <main>
 			ask_task_name(cx2, cwd, (string.gsub(trim(r.stdout), "/%.git$", "")))
+		end
+	)
+	if not started then
+		cx:toast("error", "Could not run git", cwd)
+	end
+end
+
+---------------------------------------------------------------------------
+-- Settings screen
+
+local SETTINGS_TITLE = "Task settings"
+
+local function settings_pane(cx: WindowCx): number?
+	for _, c in cx.canvas:list() do
+		if c.owner == tern.plugin.id and c.title == SETTINGS_TITLE then
+			return c.pane
+		end
+	end
+	return nil
+end
+
+local function settings_view(main: string): Node
+	local base = repo_settings(main).base
+	local actions: { Node } = { button("Change…", "base_change=" .. main, "primary") }
+	if base then
+		table.insert(actions, button("Use the focused pane's branch", "base_reset=" .. main))
+	end
+	return ui.col({
+		ui.kv({ { "repository", ui.path(main) } }),
+		ui.card({ ui.span("Base branch for new tasks", "strong") }, {
+			ui.text({
+				if base then ui.span(base, "code strong") else ui.span("The focused pane's current branch", "strong"),
+			}),
+			ui.text({
+				ui.span(
+					"New tasks branch from here. A remote branch (origin/…) is fetched first, so a task starts from its latest commit.",
+					"muted"
+				),
+			}),
+			ui.el("div", { class = "tk-actions" }, actions),
+		}),
+	})
+end
+
+local function render_settings(cx: WindowCx)
+	local pane = settings_pane(cx)
+	local main: string? = tern.kv.get("settings_main")
+	if pane ~= nil and main ~= nil then
+		cx.canvas:set(pane, { view = settings_view(main) })
+	end
+end
+
+local function open_settings(cx: WindowCx, main: string)
+	tern.kv.set("settings_main", main)
+	local pane = settings_pane(cx)
+	if pane ~= nil then
+		render_settings(cx)
+		pcall(function()
+			cx.layout:focus(pane :: number)
+		end)
+		return
+	end
+	local opened, err = cx.canvas:open({
+		title = SETTINGS_TITLE,
+		about = "Settings for the Tasks plugin, per repository. Change… picks the branch new tasks start from.",
+		view = settings_view(main),
+	})
+	if opened == nil then
+		cx:toast("error", "Could not open task settings", err)
+	end
+end
+
+-- Local and remote branches, most recently committed first.
+local function choose_base(cx: WindowCx, main: string)
+	tern.process.run(
+		{ "git", "for-each-ref", "--sort=-committerdate", "--count=300", "--format=%(refname)", "refs/heads", "refs/remotes" },
+		{ cwd = main, timeout_ms = 10000 },
+		function(r, cx2)
+			if cx2 == nil then
+				return
+			end
+			if r.status ~= 0 then
+				cx2:toast("error", "Could not list branches", trim(r.stderr))
+				return
+			end
+			local current = repo_settings(main).base
+			local items: { PickItem } = {
+				{ label = "The focused pane's current branch", detail = "default", group = "Default", ref = false, current = current == nil },
+			}
+			for _, full in string.split(trim(r.stdout), "\n") do
+				local ref, group
+				if string.sub(full, 1, 11) == "refs/heads/" then
+					ref, group = string.sub(full, 12), "Local branches"
+				elseif string.sub(full, 1, 13) == "refs/remotes/" and string.sub(full, -5) ~= "/HEAD" then
+					ref, group = string.sub(full, 14), "Remote branches"
+				end
+				if ref then
+					table.insert(items, { label = ref, group = group, ref = ref, current = ref == current })
+				end
+			end
+			table.sort(items, function(a, b)
+				-- Default first, then remote branches (the usual base), then local.
+				local order = { Default = 1, ["Remote branches"] = 2, ["Local branches"] = 3 }
+				return (order[a.group] or 9) < (order[b.group] or 9)
+			end)
+			cx2:pick({ items = items, placeholder = "Base branch for new tasks", action = "use" }):next(function(item, _err, cx3)
+				if cx3 == nil or item == nil then
+					return
+				end
+				local ref: string? = if item.ref then item.ref else nil
+				set_base(main, ref)
+				render_settings(cx3)
+				cx3:toast("success", "New tasks branch from " .. (ref or "the focused pane's current branch"))
+			end)
+		end
+	)
+end
+
+-- Finds the repository holding cwd and opens its settings.
+local function settings_from(cx: WindowCx, cwd: string)
+	local started = pcall(
+		tern.process.run,
+		{ "git", "rev-parse", "--path-format=absolute", "--git-common-dir" },
+		{ cwd = cwd, timeout_ms = 5000 },
+		function(r, cx2)
+			if cx2 == nil then
+				return
+			end
+			if r.status ~= 0 then
+				cx2:toast("error", "Task settings need a pane inside a git repository", cwd)
+				return
+			end
+			open_settings(cx2, (string.gsub(trim(r.stdout), "/%.git$", "")))
 		end
 	)
 	if not started then
@@ -751,6 +968,20 @@ tern.command({
 	end,
 })
 
+tern.command({
+	id = "task_settings",
+	title = "Task settings",
+	group = "Tasks",
+	run = function(cx)
+		local cwd = focused_cwd(cx) or tern.kv.get("last_main")
+		if cwd == nil then
+			cx:toast("error", "Task settings need a pane inside a git repository")
+			return
+		end
+		settings_from(cx, cwd)
+	end,
+})
+
 tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 	if ev.owner ~= tern.plugin.id then
 		return false
@@ -765,6 +996,19 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 		else
 			new_task_from(cx, main)
 		end
+	elseif ev.act == "settings" then
+		local main: string? = tern.kv.get("last_main")
+		if main == nil then
+			cx:toast("info", "Run Task settings from a pane inside the repository")
+		else
+			open_settings(cx, main)
+		end
+	elseif ev.act == "base_change" and ev.value then
+		choose_base(cx, ev.value :: string)
+	elseif ev.act == "base_reset" and ev.value then
+		set_base(ev.value :: string, nil)
+		render_settings(cx)
+		cx:toast("success", "New tasks branch from the focused pane's current branch")
 	elseif ev.act == "open" and id ~= nil then
 		cx.sessions:switch(id)
 	elseif ev.act == "delete" and id ~= nil then
@@ -807,7 +1051,7 @@ tern.timer(0, function(cx)
 	end
 	-- Canvases outlive plugin reloads; pick a dashboard left open back up.
 	if dashboard_pane(cx) ~= nil then
-		refresh_dashboard(cx)
+		refresh_dashboard(cx, true, false) -- a timer: start the work, draw from its callbacks
 		start_refresh_loop()
 	end
 end)

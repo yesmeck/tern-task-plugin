@@ -34,13 +34,14 @@ Requires `git`. The dashboard's pull request status also needs the
 
 ## Commands
 
-All three are in the command palette under **Tasks**.
+All four are in the command palette under **Tasks**.
 
 | Command | Key | What it does |
 |---|---|---|
 | **New task** | ⌘⇧N | Asks for a task name, then creates the branch, the worktree and the session |
 | **Delete task** | | Closes a task's session and removes its worktree and branch |
 | **Task dashboard** | | Opens a kanban board of your tasks |
+| **Task settings** | | Opens the settings screen for the focused pane's repository |
 
 ### New task
 
@@ -48,9 +49,10 @@ Run it from a pane inside a git repository. It:
 
 1. Asks for a task name. The branch name is derived from it: lowercased, with runs of other
    characters turned into `-`. Slashes are kept, so `feat/Login page` becomes `feat/login-page`.
-2. Creates the branch from the focused pane's `HEAD`, and a worktree for it beside the main
-   checkout: `<main checkout>-<branch>`, with `/` replaced by `-`. The worktree goes next to the
-   main checkout even when you start the task from inside another worktree.
+2. Creates the branch from the repository's [base branch](#task-settings) setting, or from the
+   focused pane's `HEAD` when no base branch is set. It then adds a worktree for the branch beside
+   the main checkout: `<main checkout>-<branch>`, with `/` replaced by `-`. The worktree goes next
+   to the main checkout even when you start the task from inside another worktree.
 3. Opens a session named after the task, running your default agent (Tern's **New agent block**)
    in the worktree.
 
@@ -85,13 +87,14 @@ A kanban board of open tasks, with one column per pull request stage:
 Each card shows:
 
 - the pull request: number (a link), state, CI checks (pass, fail or running) and review decision
-- the worktree's state: uncommitted files, commits ahead of the main checkout, and the age of the
-  last commit
+- the worktree's state: uncommitted files, commits not on the task's base branch (or the main
+  checkout's branch for a task started without one), and the age of the last commit
 - the branch and the worktree path
 - **Open** (switch to the task's session) and **Delete** buttons
 
-**+ New task** on the board starts a task from the main checkout's current branch, which it
-learns from the last task you started. **↻ Refresh** updates every card immediately.
+**+ New task** on the board starts a task in the repository of the last task you started. The
+branch comes from the base branch setting, or from the main checkout's current branch if none is
+set. **↻ Refresh** updates every card immediately, and **⚙ Settings** opens Task settings.
 
 While the board is open, git state refreshes every 15 seconds and pull requests once a minute.
 `gh` looks up each task's branch on its own, all in parallel; asking for every PR in one call
@@ -100,9 +103,27 @@ times out on large repositories.
 The board is a tab in the session you open it from. Open it from a session that isn't a task, or
 deleting that task closes the board too.
 
+### Task settings
+
+A settings screen for the focused pane's repository. Settings are saved separately for each
+repository.
+
+- **Base branch for new tasks:** the branch a new task starts from, for example `origin/cycle-86`.
+  **Change…** lists the repository's remote and local branches, most recently committed first.
+  **Use the focused pane's branch** clears the setting.
+  - **Remote branches** (`origin/…`) are fetched before the task's branch is created, so the task
+    starts from the latest commit. If the fetch fails, the task starts from your local copy and
+    git says so.
+  - **No upstream:** the new branch never tracks its base, so `git push -u origin HEAD` pushes it
+    under its own name.
+
+The screen is a canvas, and Tern doesn't allow typing in a canvas, so each setting has a
+**Change…** button that opens Tern's picker.
+
 ## Configuration
 
-Constants at the top of `window.luau`:
+Beyond the [settings screen](#task-settings), these constants at the top of `window.luau` can be
+changed:
 
 | Constant | Default | |
 |---|---|---|
@@ -117,10 +138,12 @@ Tern's agent-placement setting.
 
 - **Task records:** each task is saved in the plugin's key/value store (`tern.kv`), keyed by its
   session's id. That record is how the plugin knows which sessions and worktrees are its own.
+  Settings are saved in the same store, keyed by the main checkout's path.
 - **The 50 ms limit:** Tern gives each plugin handler 50 ms on the UI thread, and a handler that
   runs over is disabled until the plugins reload. So handlers here only read window state and
-  start processes. Git, `gh` and the name prompt all run in callbacks, and each dashboard refresh
-  is a single process however many tasks are open.
+  start processes. Git, `gh` and the name prompt all run in callbacks. Each dashboard refresh is
+  a single process however many tasks are open, and the board is redrawn only when what it shows
+  has changed.
 
 ## Limitations
 
