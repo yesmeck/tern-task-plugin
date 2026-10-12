@@ -3,7 +3,7 @@
 --
 -- New task (palette, cmd+shift+n): asks for a task name, creates a worktree
 -- on a new branch named after it (from the base branch setting, else the
--- focused pane's HEAD) under the worktree folder setting (default
+-- repository's default branch) under the worktree folder setting (default
 -- ~/tern/worktrees), and opens a session named after the task running only
 -- the default agent (Tern's New agent block) in the worktree.
 --
@@ -153,8 +153,8 @@ end
 -- Settings, per repository (keyed by the main checkout's path)
 
 type RepoSettings = {
-	-- Ref new tasks branch from, e.g. "origin/cycle-86"; nil: the focused
-	-- pane's current branch.
+	-- Ref new tasks branch from, e.g. "origin/cycle-86"; "HEAD": the focused
+	-- pane's current branch; nil: the repository's default branch.
 	base: string?,
 }
 
@@ -748,15 +748,23 @@ end
 ---------------------------------------------------------------------------
 -- Starting a task
 
--- Creates the branch and worktree. From a remote-tracking base (origin/…),
--- fetches that branch first so the task starts from its latest commit, and
--- leaves the new branch without an upstream so a push goes to its own name.
+-- Creates the branch and worktree. Without a base, uses the repository's
+-- default branch: origin's (origin/HEAD, else origin/main or origin/master),
+-- else a local main or master, else the starting pane's HEAD. From a
+-- remote-tracking base (origin/…), fetches that branch first so the task
+-- starts from its latest commit, and leaves the new branch without an
+-- upstream so a push goes to its own name. Prints the base it used.
 local WORKTREE_ADD_SCRIPT = [[
 branch=$1 path=$2 base=$3
 mkdir -p "$(dirname "$path")" || exit 1
 if [ -z "$base" ]; then
-	exec git worktree add --no-track -b "$branch" "$path"
+	base=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
 fi
+for ref in refs/remotes/origin/main refs/remotes/origin/master refs/heads/main refs/heads/master; do
+	[ -n "$base" ] && break
+	git show-ref --verify --quiet "$ref" && base=${ref#refs/*/}
+done
+base=${base:-HEAD}
 full=$(git rev-parse --symbolic-full-name "$base" 2>/dev/null)
 case "$full" in
 refs/remotes/*)
@@ -764,8 +772,19 @@ refs/remotes/*)
 	git fetch --quiet "${rest%%/*}" "${rest#*/}" || echo "could not fetch $base; using the local copy" >&2
 	;;
 esac
-exec git worktree add --no-track -b "$branch" "$path" "$base"
+git worktree add --no-track -b "$branch" "$path" "$base" >&2 || exit 1
+echo "$base"
 ]]
+
+-- The base as the settings screen and toasts name it.
+local function base_label(base: string?): string
+	if base == nil then
+		return "the repository's default branch"
+	elseif base == "HEAD" then
+		return "the focused pane's current branch"
+	end
+	return base
+end
 
 local function start_task(cwd: string, task: Task)
 	tern.process.run(
@@ -779,6 +798,10 @@ local function start_task(cwd: string, task: Task)
 				cx:toast("error", "Could not create the task's worktree", trim(r.stderr))
 				return
 			end
+			-- The base actually used; "HEAD" is recorded as none, so the
+			-- dashboard compares with the main checkout's branch.
+			local used = trim(r.stdout)
+			task.base = if used ~= "" and used ~= "HEAD" then used else nil
 			local session = cx.sessions:create({ name = task.name, cwd = task.path })
 			tern.kv.set(kv_key(session.id), task)
 			tern.kv.set("last_main", task.main)
@@ -833,7 +856,7 @@ local function ask_task_name(cx: WindowCx, cwd: string, main: string)
 					return
 				end
 				local base = repo_settings(main).base
-				cx3:toast("info", "Starting task " .. name .. "…", if base then branch .. " from " .. base else branch)
+				cx3:toast("info", "Starting task " .. name .. "…", branch .. " from " .. base_label(base))
 				start_task(cwd, {
 					name = name,
 					branch = branch,
@@ -887,7 +910,7 @@ local function settings_view(main: string): Node
 	local base = repo_settings(main).base
 	local actions: { Node } = { button("Change…", "base_change=" .. main, "primary") }
 	if base then
-		table.insert(actions, button("Use the focused pane's branch", "base_reset=" .. main))
+		table.insert(actions, button("Use the default branch", "base_reset=" .. main))
 	end
 	local root = global_settings().worktree_root
 	local root_actions: { Node } = { button("Change…", "root_change", "primary") }
@@ -910,7 +933,10 @@ local function settings_view(main: string): Node
 		ui.kv({ { "repository", ui.path(main) } }),
 		ui.card({ ui.span("Base branch for new tasks", "strong") }, {
 			ui.text({
-				if base then ui.span(base, "code strong") else ui.span("The focused pane's current branch", "strong"),
+				if base == nil
+					then ui.span("The repository's default branch", "strong")
+					elseif base == "HEAD" then ui.span("The focused pane's current branch", "strong")
+					else ui.span(base, "code strong"),
 			}),
 			ui.text({
 				ui.span(
@@ -966,7 +992,8 @@ local function choose_base(cx: WindowCx, main: string)
 			end
 			local current = repo_settings(main).base
 			local items: { PickItem } = {
-				{ label = "The focused pane's current branch", detail = "default", group = "Default", ref = false, current = current == nil },
+				{ label = "The repository's default branch", detail = "default", group = "Default", ref = false, current = current == nil },
+				{ label = "The focused pane's current branch", group = "Default", ref = "HEAD", current = current == "HEAD" },
 			}
 			for _, full in string.split(trim(r.stdout), "\n") do
 				local ref, group
@@ -979,10 +1006,19 @@ local function choose_base(cx: WindowCx, main: string)
 					table.insert(items, { label = ref, group = group, ref = ref, current = ref == current })
 				end
 			end
+			-- Default first, then remote branches (the usual base), then local;
+			-- by position within a group, as table.sort isn't stable.
+			local order = { Default = 1, ["Remote branches"] = 2, ["Local branches"] = 3 }
+			local position = {}
+			for i, item in items do
+				position[item] = i
+			end
 			table.sort(items, function(a, b)
-				-- Default first, then remote branches (the usual base), then local.
-				local order = { Default = 1, ["Remote branches"] = 2, ["Local branches"] = 3 }
-				return (order[a.group] or 9) < (order[b.group] or 9)
+				local ga, gb = order[a.group] or 9, order[b.group] or 9
+				if ga ~= gb then
+					return ga < gb
+				end
+				return position[a] < position[b]
 			end)
 			cx2:pick({ items = items, placeholder = "Base branch for new tasks", action = "use" }):next(function(item, _err, cx3)
 				if cx3 == nil or item == nil then
@@ -991,7 +1027,7 @@ local function choose_base(cx: WindowCx, main: string)
 				local ref: string? = if item.ref then item.ref else nil
 				set_base(main, ref)
 				render_settings(cx3)
-				cx3:toast("success", "New tasks branch from " .. (ref or "the focused pane's current branch"))
+				cx3:toast("success", "New tasks branch from " .. base_label(ref))
 			end)
 		end
 	)
@@ -1157,7 +1193,7 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 	elseif ev.act == "base_reset" and ev.value then
 		set_base(ev.value :: string, nil)
 		render_settings(cx)
-		cx:toast("success", "New tasks branch from the focused pane's current branch")
+		cx:toast("success", "New tasks branch from " .. base_label(nil))
 	elseif ev.act == "open" and id ~= nil then
 		cx.sessions:switch(id)
 	elseif ev.act == "delete" and id ~= nil then

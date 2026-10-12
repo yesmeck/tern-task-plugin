@@ -50,7 +50,7 @@ Run it from a pane inside a git repository. It:
 1. Asks for a task name. The branch name is derived from it: lowercased, with runs of other
    characters turned into `-`. Slashes are kept, so `feat/Login page` becomes `feat/login-page`.
 2. Creates the branch from the repository's [base branch](#task-settings) setting, or from the
-   focused pane's `HEAD` when no base branch is set. It then adds a worktree for the branch at
+   repository's default branch when no base branch is set. It then adds a worktree for the branch at
    `<worktree folder>/<repository>/<branch>`, with `/` in the branch replaced by `-`. The
    [worktree folder](#task-settings) defaults to `~/tern/worktrees`, and `<repository>` is the
    main checkout's folder name, even when you start the task from inside another worktree.
@@ -94,7 +94,7 @@ Each card shows:
 - **Open** (switch to the task's session) and **Delete** buttons
 
 **+ New task** on the board starts a task in the repository of the last task you started. The
-branch comes from the base branch setting, or from the main checkout's current branch if none is
+branch comes from the base branch setting, or from the repository's default branch if none is
 set. **↻ Refresh** updates every card immediately, and **⚙ Settings** opens Task settings.
 
 Git state refreshes every 15 seconds and pull requests once a minute.
@@ -138,8 +138,12 @@ repository's own settings.
   for an absolute path or one starting with `~`; missing folders are created when a task starts.
   Moving the folder doesn't move existing tasks, which stay where they were created.
 - **Base branch for new tasks** (per repository): the branch a new task starts from, for example `origin/cycle-86`.
-  **Change…** lists the repository's remote and local branches, most recently committed first.
-  **Use the focused pane's branch** clears the setting.
+  **Change…** lists the repository's remote and local branches, most recently committed first,
+  after two choices: **The repository's default branch** and **The focused pane's current branch**.
+  **Use the default branch** clears the setting.
+  - **Default branch** (when nothing is set): origin's default branch (`origin/HEAD`, else
+    `origin/main` or `origin/master`), else a local `main` or `master`, else the focused pane's
+    `HEAD`.
   - **Remote branches** (`origin/…`) are fetched before the task's branch is created, so the task
     starts from the latest commit. If the fetch fails, the task starts from your local copy and
     git says so.
