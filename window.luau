@@ -22,9 +22,11 @@
 -- kept and a toast says why. Other sessions close as usual, and New session
 -- is Tern's own.
 --
--- Task dashboard: a canvas listing the open tasks with their git state and
--- Open / Delete buttons, plus New task and Refresh. It refreshes itself
--- while open.
+-- Task dashboard: a kanban canvas of the open tasks, in columns by pull
+-- request (In progress: none yet, Draft, In review, Done: merged or closed),
+-- each card with its git state, PR checks and review, and Open / Delete
+-- buttons. It refreshes itself while open: git every 15 s, GitHub (gh)
+-- every minute.
 --
 -- Window handlers run on the UI thread under a 50 ms budget, and one overrun
 -- disables the handler until the plugins reload. So handlers only read
@@ -33,6 +35,14 @@
 
 local ui = tern.ui
 
+tern.css(
+	"board",
+	[[
+.tk-board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
+.tk-column { flex: 1 1 0; min-width: 260px; display: flex; flex-direction: column; gap: 8px; }
+]]
+)
+
 -- How long to wait for a close to finish, e.g. while Tern asks to confirm
 -- ending a running program.
 local CLOSE_POLL_MS = 500
@@ -40,13 +50,28 @@ local CLOSE_POLL_TRIES = 240
 
 local DASHBOARD_TITLE = "Tasks"
 local DASHBOARD_REFRESH_MS = 15000
+-- Pull requests every 4th refresh (once a minute), as GitHub rate-limits.
+local PR_REFRESH_EVERY = 4
 
 type Task = { name: string, branch: string, path: string, main: string }
 type OpenTask = { id: number, task: Task, current: boolean }
 -- Git state of a task's worktree, as the dashboard shows it.
 type Stats = { changes: number, ahead: number, last: string } | { missing: true }
 
+-- The task branch's pull request, from gh. checks: "pass" | "fail" |
+-- "pending" | "none"; review: GitHub's reviewDecision, "" when there is none.
+type Pr = {
+	number: string,
+	state: string,
+	draft: boolean,
+	url: string,
+	review: string,
+	checks: string,
+}
+
 local stats: { [number]: Stats } = {}
+-- false: gh found no pull request for the branch.
+local prs: { [number]: Pr | false } = {}
 
 local function kv_key(session_id: number): string
 	return "session:" .. tostring(session_id)
@@ -115,6 +140,60 @@ local function button(text: string, act: string, class: string?): Node
 	return ui.el("button", { class = class, text = text, actions = { click = act } })
 end
 
+-- Kanban columns, left to right. A task's column comes from its PR.
+local COLUMNS = {
+	{ id = "progress", title = "In progress" },
+	{ id = "draft", title = "Draft" },
+	{ id = "review", title = "In review" },
+	{ id = "done", title = "Done" },
+}
+
+local function column_of(id: number): string
+	local pr = prs[id]
+	if not pr then
+		return "progress" -- no PR yet (or not fetched yet)
+	elseif pr.state == "MERGED" or pr.state == "CLOSED" then
+		return "done"
+	elseif pr.draft then
+		return "draft"
+	end
+	return "review"
+end
+
+local CHECK_BADGES = {
+	pass = { "checks pass", "success" },
+	fail = { "checks fail", "error" },
+	pending = { "checks running", "pending" },
+}
+local REVIEW_BADGES = {
+	APPROVED = { "approved", "success" },
+	CHANGES_REQUESTED = { "changes requested", "error" },
+	REVIEW_REQUIRED = { "review required", "muted" },
+}
+
+local function pr_line(id: number): Node?
+	local pr = prs[id]
+	if pr == nil then
+		return ui.text({ ui.span("PR: checking…", "muted") })
+	elseif pr == false then
+		return ui.text({ ui.span("No pull request", "muted") })
+	end
+	local p = pr :: Pr
+	local parts: { Node } = {
+		ui.text({ ui.link("#" .. p.number, p.url, "strong") }),
+		ui.badge(string.lower(p.state), if p.state == "MERGED" then "accent" elseif p.state == "CLOSED" then "muted" else "info"),
+	}
+	local check = CHECK_BADGES[p.checks]
+	if check and p.state == "OPEN" then
+		table.insert(parts, ui.badge(check[1], check[2]))
+	end
+	local review = REVIEW_BADGES[p.review]
+	if review and p.state == "OPEN" then
+		table.insert(parts, ui.badge(review[1], review[2]))
+	end
+	return ui.row(parts)
+end
+
 local function task_card(t: OpenTask): Node
 	local s = stats[t.id]
 	local badges: { Node } = {}
@@ -139,31 +218,58 @@ local function task_card(t: OpenTask): Node
 		end
 		last = st.last
 	end
-	return ui.card({ ui.span(t.task.name, "strong") }, {
-		ui.row(badges),
+	local body: { Node } = {}
+	local pr = pr_line(t.id)
+	if pr then
+		table.insert(body, pr)
+	end
+	table.insert(body, ui.row(badges))
+	table.insert(
+		body,
 		ui.kv({
 			{ "branch", ui.span(t.task.branch, "code") },
 			{ "worktree", ui.path(t.task.path) },
 			{ "last commit", last },
-		}),
+		})
+	)
+	table.insert(
+		body,
 		ui.row({
 			button("Open", "open=" .. tostring(t.id)),
 			button("Delete", "delete=" .. tostring(t.id), "danger"),
-		}),
-	})
+		})
+	)
+	return ui.card({ ui.span(t.task.name, "strong") }, body)
 end
 
 local function dashboard_view(cx: WindowCx): Node
+	local by_column: { [string]: { OpenTask } } = {}
+	for _, c in COLUMNS do
+		by_column[c.id] = {}
+	end
 	local tasks = open_tasks(cx)
+	for _, t in tasks do
+		table.insert(by_column[column_of(t.id)], t)
+	end
+
+	local columns: { Node } = {}
+	for _, c in COLUMNS do
+		local cards: { Node } = {
+			ui.text({ ui.span(c.title, "strong"), ui.span("  " .. #by_column[c.id], "muted num") }),
+		}
+		for _, t in by_column[c.id] do
+			table.insert(cards, task_card(t))
+		end
+		table.insert(columns, ui.el("div", { class = "tk-column" }, cards))
+	end
+
 	local children: { Node } = {
 		ui.row({ button("New task", "new"), button("Refresh", "refresh") }),
 	}
 	if #tasks == 0 then
 		table.insert(children, ui.md("No open tasks. **New task** starts one."))
 	end
-	for _, t in tasks do
-		table.insert(children, task_card(t))
-	end
+	table.insert(children, ui.el("div", { class = "tk-board" }, columns))
 	return ui.col(children)
 end
 
@@ -172,6 +278,17 @@ local function render_dashboard(cx: WindowCx)
 	if pane ~= nil then
 		cx.canvas:set(pane, { view = dashboard_view(cx) })
 	end
+end
+
+local function task_args(cx: WindowCx, fields: (Task) -> { string }): { string }
+	local args = {}
+	for _, t in open_tasks(cx) do
+		table.insert(args, tostring(t.id))
+		for _, f in fields(t.task) do
+			table.insert(args, f)
+		end
+	end
+	return args
 end
 
 -- One process for every task, so a refresh spawns once however many tasks
@@ -193,21 +310,52 @@ while [ $# -ge 4 ]; do
 done
 ]]
 
-local function refresh_dashboard(cx: WindowCx)
-	if dashboard_pane(cx) == nil then
+-- Each task's PR, looked up by branch in parallel. Arguments come in
+-- (id, main, branch) groups; each prints
+--   id<TAB>number<TAB>state<TAB>draft<TAB>url<TAB>reviewDecision<TAB>checks
+-- or "id<TAB>none" when the branch has no PR, or "id<TAB>error" when gh
+-- failed (offline, not logged in), which leaves the last answer shown.
+-- A Tern window started from the Dock has a short PATH, hence the additions.
+local PR_SCRIPT = [[
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+export GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1
+jq='.[0] // empty | [.number, .state, .isDraft, .url, (.reviewDecision // ""),
+  (.statusCheckRollup
+    | map(if .__typename == "CheckRun"
+          then (if .status != "COMPLETED" then "pending"
+                elif (.conclusion == "SUCCESS" or .conclusion == "SKIPPED" or .conclusion == "NEUTRAL") then "pass"
+                else "fail" end)
+          else (if (.state == "PENDING" or .state == "EXPECTED") then "pending"
+                elif .state == "SUCCESS" then "pass" else "fail" end) end)
+    | if length == 0 then "none" elif index("fail") then "fail"
+      elif index("pending") then "pending" else "pass" end)] | @tsv'
+while [ $# -ge 3 ]; do
+	id=$1 main=$2 branch=$3
+	shift 3
+	(
+		out=$(cd "$main" && gh pr list --state all --head "$branch" --limit 1 \
+			--json number,state,isDraft,url,reviewDecision,statusCheckRollup --jq "$jq" 2>/dev/null)
+		if [ $? -ne 0 ]; then
+			printf '%s\terror\n' "$id"
+		elif [ -z "$out" ]; then
+			printf '%s\tnone\n' "$id"
+		else
+			printf '%s\t%s\n' "$id" "$out"
+		fi
+	) &
+done
+wait
+]]
+
+local function refresh_stats(cx: WindowCx)
+	local args = task_args(cx, function(task)
+		return { task.path, task.main, task.branch }
+	end)
+	if #args == 0 then
 		return
 	end
-	render_dashboard(cx)
 	local argv = { "sh", "-c", STATS_SCRIPT, "sh" }
-	for _, t in open_tasks(cx) do
-		table.insert(argv, tostring(t.id))
-		table.insert(argv, t.task.path)
-		table.insert(argv, t.task.main)
-		table.insert(argv, t.task.branch)
-	end
-	if #argv == 4 then
-		return
-	end
+	table.move(args, 1, #args, #argv + 1, argv)
 	tern.process.run(argv, { timeout_ms = 20000 }, function(r, cx2)
 		if cx2 == nil then
 			return
@@ -227,6 +375,55 @@ local function refresh_dashboard(cx: WindowCx)
 	end)
 end
 
+local function refresh_prs(cx: WindowCx)
+	local args = task_args(cx, function(task)
+		return { task.main, task.branch }
+	end)
+	if #args == 0 then
+		return
+	end
+	local argv = { "sh", "-c", PR_SCRIPT, "sh" }
+	table.move(args, 1, #args, #argv + 1, argv)
+	tern.process.run(argv, { timeout_ms = 60000 }, function(r, cx2)
+		if cx2 == nil then
+			return
+		end
+		for _, line in string.split(r.stdout, "\n") do
+			local f = string.split(line, "\t")
+			local id = tonumber(f[1] or "")
+			if id ~= nil then
+				if f[2] == "none" then
+					prs[id] = false
+				elseif #f >= 7 then
+					prs[id] = {
+						number = f[2],
+						state = f[3],
+						draft = f[4] == "true",
+						url = f[5],
+						review = f[6],
+						checks = f[7],
+					}
+				end
+				-- "error": keep whatever was shown before.
+			end
+		end
+		render_dashboard(cx2)
+	end)
+end
+
+-- with_prs: also ask GitHub, which is slower and rate-limited, so the
+-- refresh loop does it only every few ticks.
+local function refresh_dashboard(cx: WindowCx, with_prs: boolean?)
+	if dashboard_pane(cx) == nil then
+		return
+	end
+	render_dashboard(cx)
+	refresh_stats(cx)
+	if with_prs ~= false then
+		refresh_prs(cx)
+	end
+end
+
 local refresh_loop_running = false
 
 local function start_refresh_loop()
@@ -234,13 +431,15 @@ local function start_refresh_loop()
 		return
 	end
 	refresh_loop_running = true
+	local ticks = 0
 	local function tick()
 		tern.timer(DASHBOARD_REFRESH_MS, function(cx)
 			if cx == nil or dashboard_pane(cx) == nil then
 				refresh_loop_running = false
 				return
 			end
-			refresh_dashboard(cx)
+			ticks += 1
+			refresh_dashboard(cx, ticks % PR_REFRESH_EVERY == 0)
 			tick()
 		end)
 	end
