@@ -4,7 +4,7 @@
 -- New task (palette, cmd+shift+n): asks for a task name, creates a worktree
 -- on a new branch named after it (from the focused pane's HEAD) beside the
 -- main checkout, and opens a session named after the task with its first tab
--- in the worktree.
+-- in the worktree and the default agent (Tern's New agent block) beside it.
 --
 --   task name:      Fix login redirect
 --   branch:         fix-login-redirect
@@ -65,6 +65,8 @@ local CLOSE_POLL_TRIES = 240
 
 local DASHBOARD_TITLE = "Tasks"
 local DASHBOARD_REFRESH_MS = 15000
+-- Start the default agent in a new task's session.
+local OPEN_AGENT = true
 -- Pull requests every 4th refresh (once a minute), as GitHub rate-limits.
 local PR_REFRESH_EVERY = 4
 
@@ -591,6 +593,13 @@ local function start_task(cwd: string, task: Task)
 			tern.kv.set("last_main", task.main)
 			cx:toast("success", "Task started: " .. task.name, task.path)
 			refresh_dashboard(cx)
+			if OPEN_AGENT then
+				-- Tern's own New agent block: the default agent, placed by the
+				-- agent-placement setting, in the focused pane's directory (the
+				-- new session's first pane, in the worktree). Last, so nothing
+				-- else in this callback runs after the heaviest step.
+				cx:command("new_agent_block")
+			end
 		end
 	)
 end
