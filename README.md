@@ -14,6 +14,8 @@ worktree:   ~/code/my-repo-fix-login-redirect
 session:    Fix login redirect  (running the default agent)
 ```
 
+![The task dashboard: open tasks in columns by pull request stage](docs/dashboard.png)
+
 ## Install
 
 ```sh
