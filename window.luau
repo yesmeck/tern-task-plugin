@@ -897,24 +897,22 @@ local function base_label(base: string?): string
 	return base
 end
 
--- Opens the tab for a task whose worktree is ready, in the current session:
--- the default agent in the worktree, else a shell there.
+-- Opens the tab for a task whose worktree is ready, in the current session,
+-- with the default agent in the worktree as its only pane.
 local function open_task_tab(cx: WindowCx, task: Task)
-	local tab: number? = nil
-	if OPEN_AGENT then
-		pcall(function()
-			local pane = cx.agents:start({ prompt = "", cwd = task.path, how = "tab" })
-			tab = cx.session:tab_of(pane) or current_tab(cx)
-		end)
-	end
+	local tab = cx.layout:tab({ name = task.name, cwd = task.path })
 	if tab == nil then
-		tab = cx.layout:tab({ name = task.name, cwd = task.path })
-		if tab == nil then
-			cx:toast("error", "Could not open a tab for " .. task.name, task.path)
-			return
-		end
-		if OPEN_AGENT then
-			-- Tern's own New agent block, beside the shell.
+		cx:toast("error", "Could not open a tab for " .. task.name, task.path)
+		return
+	end
+	if OPEN_AGENT then
+		-- The agent takes the place of the new tab's lone shell; Tern does
+		-- the replacing, as closing the shell from here would close the tab.
+		-- Failing that, Tern's own New agent block beside the shell.
+		local started = pcall(function()
+			cx.agents:start({ prompt = "", cwd = task.path, how = "replace_if_alone" })
+		end)
+		if not started then
 			cx:command("new_agent_block")
 		end
 	end
