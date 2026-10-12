@@ -1,17 +1,17 @@
 # Tasks for Tern
 
-A [Tern](https://stencil.so/tern) plugin where **a task is a session with its own git worktree**.
+A [Tern](https://stencil.so/tern) plugin where **a task is a tab with its own git worktree**.
 
 Start a task and you get a fresh branch, a worktree for it in one central folder, and a
-Tern session running your default agent inside that worktree. Delete the task and the session,
-worktree and branch go away together, but git refuses to delete anything that holds work you
+tab in the current session running your default agent inside that worktree. Delete the task and
+the tab, worktree and branch go away together, but git refuses to delete anything that holds work you
 haven't committed or merged.
 
 ```
 task name:  Fix login redirect
 branch:     fix-login-redirect
 worktree:   ~/tern/worktrees/my-repo/fix-login-redirect
-session:    Fix login redirect  (running the default agent)
+tab:        Fix login redirect  (running the default agent)
 ```
 
 ![The task dashboard: open tasks in columns by pull request stage](docs/dashboard.png)
@@ -38,9 +38,9 @@ All four are in the command palette under **Tasks**.
 
 | Command | Key | What it does |
 |---|---|---|
-| **New task** | ⌘⇧N | Asks for a task name, then creates the branch, the worktree and the session |
-| **Delete task** | | Closes a task's session and removes its worktree and branch |
-| **Task dashboard** | | Opens a kanban board of your tasks |
+| **New task** | ⌘⇧N | Asks for a task name, then creates the branch, the worktree and the tab |
+| **Delete task** | | Closes a task's tab and removes its worktree and branch |
+| **Task dashboard** | | Opens a kanban board of the current repository's tasks |
 | **Task settings** | | Opens the settings screen for the focused pane's repository |
 
 ### New task
@@ -54,33 +54,38 @@ Run it from a pane inside a git repository. It:
    `<worktree folder>/<repository>/<branch>`, with `/` in the branch replaced by `-`. The
    [worktree folder](#task-settings) defaults to `~/tern/worktrees`, and `<repository>` is the
    main checkout's folder name, even when you start the task from inside another worktree.
-3. Opens a session named after the task, running your default agent in the worktree in place of
-   the session's shell.
+3. Opens a tab in the current session named after the task, running your default agent in the
+   worktree.
 
 On first load the plugin binds ⌘⇧N to New task through Tern's settings. It does this only once,
 so if you rebind the key later, your choice stays.
 
 ### Delete task
 
-Deletes the current session's task, or one you pick from a list when the current session isn't a
-task. It:
+Deletes the current tab's task, or one you pick from a list when the current tab isn't a task.
+It:
 
 1. Refuses if the worktree has uncommitted or untracked changes.
-2. Closes the session, with Tern's usual confirmation if something is still running.
+2. Closes the tab, with Tern's usual confirmation if something is still running.
 3. Removes the worktree (`git worktree remove`) and deletes the branch (`git branch -d`).
    If the branch has unmerged commits, the branch is kept and a toast says so.
 
-Closing a task's session with Tern's own **Close session** cleans up the same way, except that
-it doesn't check for changes before closing. If git then refuses to remove the worktree, the
-worktree stays on disk and a toast shows git's message. A task session that Tern closes because
-its last pane exited (the agent quit, for example) keeps its worktree and branch.
+Closing a task's tab with Tern's own **Close tab**, or closing the session holding it with
+**Close session**, cleans up the same way, except that it doesn't check for changes before
+closing. If git then refuses to remove the worktree, the worktree stays on disk and a toast shows
+git's message. A task tab that closes any other way (its last pane exited because the agent quit,
+for example) keeps its worktree and branch.
 
-The plugin only ever removes worktrees it created. Other sessions close normally, and other
+The plugin only ever removes worktrees it created. Other tabs close normally, and other
 worktrees are never touched.
 
 ### Task dashboard
 
-A kanban board of open tasks, with one column per pull request stage:
+A kanban board of the open tasks in one repository, with one column per pull request stage. The
+repository is the one holding the directory of a pane in the session you open the board from;
+running **Task dashboard** again from another repository's session switches the board to it. When
+no pane has a directory, the board keeps the repository it last showed, and outside any repository
+it shows every task.
 
 | In progress | Draft | In review | Done |
 |---|---|---|---|
@@ -92,7 +97,7 @@ Each card shows:
 - the worktree's state: uncommitted files, commits not on the task's base branch (or the main
   checkout's branch for a task started without one), and the age of the last commit
 - the branch and the worktree path
-- **Open** (switch to the task's session) and **Delete** buttons
+- **Open** (switch to the task's tab) and **Delete** buttons
 
 **+ New task** on the board starts a task in the repository of another pane in the session, or,
 if no pane has a directory, in the repository of the last task you started. The branch comes from the base branch setting, or from the repository's default branch if none is
@@ -102,13 +107,11 @@ Git state refreshes every 15 seconds and pull requests once a minute.
 `gh` looks up each task's branch on its own, all in parallel; asking for every PR in one call
 times out on large repositories.
 
-The board is a tab in the session you open it from. Open it from a session that isn't a task, or
-deleting that task closes the board too.
+The board is a tab in the session you open it from.
 
-### Status in session names
+### Status in tab names
 
-Each task's session name shows its status after the task name, so the session list doubles as an
-overview:
+Each task's tab name shows its status after the task name, so the tab bar doubles as an overview:
 
 ```
 Fix login redirect · #3413 ✓ · ±2
@@ -123,11 +126,11 @@ hello task
 - **`worktree missing`:** the worktree folder is gone.
 
 Names update in the background, git every 15 seconds and PRs once a minute, whether or not the
-dashboard is open. A session is renamed only when its status changes.
+dashboard is open. A tab is renamed only when its status changes.
 
-The part of the name before the first ` · ` is the task's name. Renaming a task's session by hand
+The part of the name before the first ` · ` is the task's name. Renaming a task's tab by hand
 renames the task, and the status is added back after the new name. To turn the status off, set
-`STATUS_IN_SESSION_NAMES = false` in `window.luau`.
+`STATUS_IN_TAB_NAMES = false` in `window.luau`.
 
 ### Task settings
 
@@ -162,8 +165,8 @@ changed:
 
 | Constant | Default | |
 |---|---|---|
-| `OPEN_AGENT` | `true` | Start the default agent in a new task's session, with no shell pane |
-| `STATUS_IN_SESSION_NAMES` | `true` | Show each task's status after its session name |
+| `OPEN_AGENT` | `true` | Start the default agent in a new task's tab, with no shell pane |
+| `STATUS_IN_TAB_NAMES` | `true` | Show each task's status after its tab name |
 | `DASHBOARD_REFRESH_MS` | `15000` | How often task git state refreshes |
 | `PR_REFRESH_EVERY` | `4` | Fetch pull requests every Nth refresh |
 
@@ -174,7 +177,8 @@ agent-placement setting says and leaves the shell open.
 ## How it works
 
 - **Task records:** each task is saved in the plugin's key/value store (`tern.kv`), keyed by its
-  session's id. That record is how the plugin knows which sessions and worktrees are its own.
+  tab's id. That record is how the plugin knows which tabs and worktrees are its own. Tasks from
+  versions before 0.10, when each task was a session, move to their session's first tab on load.
   Settings are saved in the same store, keyed by the main checkout's path.
 - **The 50 ms limit:** Tern gives each plugin handler 50 ms on the UI thread, and a handler that
   runs over is disabled until the plugins reload. So handlers here only read window state and
@@ -184,12 +188,13 @@ agent-placement setting says and leaves the shell open.
 
 ## Limitations
 
-- **Older sessions:** sessions made before you installed the plugin, or renamed by hand, aren't
-  tasks and are never cleaned up.
-- **Other ways of closing:** closing a session from `tern ctl` or Carly skips plugin hooks, so
-  the worktree stays. Remove it with `git worktree remove <path>`.
+- **Older tabs:** tabs opened before you installed the plugin aren't tasks and are never cleaned
+  up.
+- **Other ways of closing:** a tab closed from `tern ctl`, Carly, or anything other than the
+  **Close tab** and **Close session** commands keeps its worktree, as the plugin can't tell it
+  from the agent quitting. Remove it with `git worktree remove <path>`.
 - **Missed hooks:** if the plugin is reloaded while Tern is asking to confirm a close, the
-  cleanup is lost. Close the session again or remove the worktree by hand.
+  cleanup is lost. Remove the worktree by hand.
 - **Short PATH:** a Tern opened from the Dock may have a short `PATH`, so the dashboard adds
   `/opt/homebrew/bin` and `/usr/local/bin` when looking for `gh`.
 
