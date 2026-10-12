@@ -162,19 +162,32 @@ local function focused_cwd(cx: WindowCx): string?
 	return nil
 end
 
--- The focused pane's directory, or else the first pane in this session with
--- one: canvas panes such as the dashboard have no directory.
+-- The focused pane's directory, or else that of another pane in the
+-- focused tab, then in the current session's other tabs: canvas panes such
+-- as the dashboard have no directory.
 local function window_cwd(cx: WindowCx): string?
 	local cwd = focused_cwd(cx)
 	if cwd ~= nil then
 		return cwd
 	end
-	for _, pane in cx.session:panes() do
-		if pane.cwd ~= "" then
-			return pane.cwd
+	local here = current_tab(cx)
+	local tabs: { number } = {}
+	for _, s in cx.session:sessions() do
+		if s.current then
+			tabs = s.tabs
 		end
 	end
-	return nil
+	local fallback: string? = nil
+	for _, pane in cx.session:panes() do
+		if pane.cwd ~= "" and pane.cwd ~= nil and pane.tab ~= nil then
+			if pane.tab == here then
+				return pane.cwd
+			elseif fallback == nil and table.find(tabs, pane.tab :: number) ~= nil then
+				fallback = pane.cwd
+			end
+		end
+	end
+	return fallback
 end
 
 local function trim(s: string): string
@@ -371,13 +384,13 @@ local function task_card(t: OpenTask): Node
 	return ui.card({ ui.span(t.task.name, "strong") }, body)
 end
 
--- The main checkout whose tasks the board shows, set when the dashboard is
--- opened from a pane's directory; nil shows every task. In the kv store, as
--- the board outlives reloads.
-local DASHBOARD_MAIN_KEY = "dashboard_main"
+-- The main checkout whose tasks this window's board shows, from the
+-- window's directory (see set_dashboard_repo); nil shows every task. Per
+-- window, so boards in two windows show their own repositories.
+local dashboard_main: string? = nil
 
 local function board_tasks(cx: WindowCx): { OpenTask }
-	local main: string? = tern.kv.get(DASHBOARD_MAIN_KEY)
+	local main = dashboard_main
 	local tasks = open_tasks(cx)
 	if main == nil then
 		return tasks
@@ -418,7 +431,7 @@ local function board_view(tasks: { OpenTask }): Node
 			button("⚙ Settings", "settings"),
 		}),
 	}
-	local main: string? = tern.kv.get(DASHBOARD_MAIN_KEY)
+	local main = dashboard_main
 	if main ~= nil then
 		table.insert(children, ui.kv({ { "repository", ui.path(main) } }))
 	end
@@ -463,7 +476,7 @@ local function render_dashboard(cx: WindowCx, force: boolean?)
 		return
 	end
 	local tasks = board_tasks(cx)
-	local signature = (tern.kv.get(DASHBOARD_MAIN_KEY) or "") .. "\n" .. board_signature(tasks)
+	local signature = (dashboard_main or "") .. "\n" .. board_signature(tasks)
 	if not force and signature == drawn_signature then
 		return
 	end
@@ -484,17 +497,14 @@ local function known_main(cx: WindowCx, cwd: string): string?
 	return nil
 end
 
--- Points the board at the repository holding the current session's
--- directory: a known task's at once, then git's answer.
+-- Points the board at the repository holding the window's directory
+-- (window_cwd): a known task's at once, then git's answer.
 local function set_dashboard_repo(cx: WindowCx)
 	local cwd = window_cwd(cx)
 	if cwd == nil then
 		return -- no directory to go by: keep showing what the board shows
 	end
-	local guess = known_main(cx, cwd)
-	if guess ~= nil then
-		tern.kv.set(DASHBOARD_MAIN_KEY, guess)
-	end
+	dashboard_main = known_main(cx, cwd)
 	pcall(
 		tern.process.run,
 		{ "git", "rev-parse", "--path-format=absolute", "--git-common-dir" },
@@ -505,7 +515,7 @@ local function set_dashboard_repo(cx: WindowCx)
 			end
 			-- Outside a repository: show every task.
 			local main = if r.status == 0 then (string.gsub(trim(r.stdout), "/%.git$", "")) else nil
-			tern.kv.set(DASHBOARD_MAIN_KEY, main)
+			dashboard_main = main
 			render_dashboard(cx2)
 		end
 	)
@@ -1452,6 +1462,11 @@ tern.timer(0, function(cx)
 		cx:toast("info", "⌘⇧N now starts a new task")
 	end
 	migrate_session_tasks(cx)
+	-- A board left open (canvases outlive reloads) shows the window's
+	-- repository again.
+	if dashboard_pane(cx) ~= nil then
+		set_dashboard_repo(cx)
+	end
 	-- Keeps the tab names (and a dashboard left open, as canvases outlive
 	-- reloads) up to date. A timer: start the work, draw from its callbacks.
 	refresh_tasks(cx, true, false)

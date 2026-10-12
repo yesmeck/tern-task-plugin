@@ -1,6 +1,6 @@
 schema = 1
 id = "worktree-sessions"
 name = "Tasks"
-version = "0.10.1"
+version = "0.10.2"
 description = "A task is a tab with its own git worktree: New task creates both, Delete task removes them, and the task dashboard shows the current repository's."
 window = "window.luau"

@@ -81,11 +81,11 @@ worktrees are never touched.
 
 ### Task dashboard
 
-A kanban board of the open tasks in one repository, with one column per pull request stage. The
-repository is the one holding the directory of a pane in the session you open the board from;
-running **Task dashboard** again from another repository's session switches the board to it. When
-no pane has a directory, the board keeps the repository it last showed, and outside any repository
-it shows every task.
+A kanban board of the open tasks in the current window's repository, with one column per pull
+request stage. The repository is the one holding the focused pane's directory, or, when the focused
+pane has none (the dashboard itself, for example), that of another pane in the same tab, then in the
+session. Each window's board shows its own repository, and running **Task dashboard** again after
+moving to another repository switches the board to it. Outside any repository it shows every task.
 
 | In progress | Draft | In review | Done |
 |---|---|---|---|
