@@ -124,6 +124,10 @@ local function task_card(card: Card): Node
 		{ "branch", ui.span(card.branch, "code") },
 		{ "worktree", ui.path(card.path) },
 	}
+	if card.pr and card.pr.url ~= "" then
+		local url = card.pr.url
+		table.insert(details, { "pull request", ui.link((string.gsub(url, "^https?://", "")), url) })
+	end
 	if last ~= nil then
 		table.insert(details, { "last commit", last })
 	end
