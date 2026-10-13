@@ -1,5 +1,5 @@
 --!strict
--- Shared dashboard model and native block view. Keys follow task tab ids,
+-- Shared dashboard model and native block view. Keys follow task session ids,
 -- so Tern's block renderer can diff updates without replacing the board.
 local ui = tern.ui
 local Dashboard = {}

@@ -1,37 +1,38 @@
 --!strict
--- Tasks: a task is a tab with its own git worktree.
+-- Tasks: a task is a session with its own git worktree.
 --
 -- New task (palette, cmd+shift+n): asks for a task name, creates a worktree
 -- on a new branch named after it (from the base branch setting, else the
 -- repository's default branch) under the worktree folder setting (default
--- ~/tern/worktrees), and opens a tab in the current session named after the
--- task, running the default agent in the worktree.
+-- ~/tern/worktrees), and opens a session named after the task running only
+-- the default agent in the worktree.
 --
 --   task name:      Fix login redirect
 --   branch:         fix-login-redirect
 --   worktree:       ~/tern/worktrees/resvu-platform-agent/fix-login-redirect
---   tab:            Fix login redirect
+--   session:        Fix login redirect
 --
--- Delete task: the current tab's task, or one picked from the open tasks.
--- Refuses while the worktree has uncommitted or untracked changes;
--- otherwise closes the tab (with Tern's usual confirmation) and then
+-- Delete task: the current session's task, or one picked from the open
+-- tasks. Refuses while the worktree has uncommitted or untracked changes;
+-- otherwise closes the session (with Tern's usual confirmation) and then
 -- removes the worktree and branch.
 --
--- Close tab on a task's tab (or Close session on a session holding task
--- tabs): once it has closed, removes the worktree and deletes the branch.
--- git refuses both when they would lose work (uncommitted changes, unmerged
--- commits); the worktree or branch is then kept and a toast says why. A task
--- tab that closes any other way (its last pane exited, say) keeps both.
+-- Close session on a task's session: once it has closed, removes the
+-- worktree and deletes the branch. git refuses both when they would lose work
+-- (uncommitted changes, unmerged commits); the worktree or branch is then
+-- kept and a toast says why. A task session Tern closes because its last
+-- pane exited keeps both. Other sessions close as usual, and New session
+-- is Tern's own.
 --
--- Tab names: each task's tab is named "<task> · <status>", e.g.
+-- Session names: each task's session is named "<task> · <status>", e.g.
 -- "Fix login · #3413 ✓ · ±2" (PR, checks, uncommitted files), kept up to
 -- date in the background.
 --
--- Task dashboard: a native block view of the open tasks in the current
--- repository, in columns by pull request (In progress: none yet, Draft, In
--- review, Done: merged or closed), each card with its git state, PR checks
--- and review, and Open / Delete buttons. Task state refreshes in the
--- background: git every 15 s, GitHub (gh) every minute.
+-- Task dashboard: a native block of the repository's tasks, in columns by pull
+-- request (In progress: none yet, Draft, In review, Done: merged or closed),
+-- each card with its git state, PR checks and review, and Open / Delete
+-- buttons. Task state refreshes in the background: git every 15 s, GitHub
+-- (gh) every minute.
 --
 -- Window handlers run on the UI thread under a 50 ms budget, and one overrun
 -- disables the handler until the plugins reload. So handlers only read
@@ -42,25 +43,26 @@ local ui = tern.ui
 local Dashboard = require("./dashboard")
 
 
--- How long after Close tab or Delete task a task's tab closing still counts
+-- How long after Close session or Delete task a session closing still counts
 -- as asked for, e.g. while Tern asks to confirm ending a running program.
 local CLOSE_INTENT_S = 120
+local CLOSE_POLL_MS = 250
 
 local DASHBOARD_KIND = tern.plugin.id .. ".dashboard"
 local DASHBOARD_LINK_PREFIX = tern.plugin.id .. "://dashboard/"
 local DASHBOARD_REFRESH_MS = 15000
 local STARTUP_REFRESH_DELAY_MS = 3000
--- Start the default agent in a new task's tab.
+-- Start the default agent in a new task's session.
 local OPEN_AGENT = true
--- Append each task's status to its tab name ("Fix login · #3413 ✓ · ±2").
-local STATUS_IN_TAB_NAMES = true
+-- Append each task's status to its session name ("Fix login · #3413 ✓ · ±2").
+local STATUS_IN_SESSION_NAMES = true
 -- Pull requests every 4th refresh (once a minute), as GitHub rate-limits.
 local PR_REFRESH_EVERY = 4
 
 -- base: the ref the branch was created from (nil: the starting pane's HEAD).
 type Task = { name: string, branch: string, path: string, main: string, base: string? }
--- id: the task's tab; session: the session holding it.
-type OpenTask = { id: number, session: number, task: Task, current: boolean }
+-- id: the session owning the task and its worktree.
+type OpenTask = { id: number, task: Task, current: boolean }
 type Stats = Dashboard.Stats
 type Pr = Dashboard.Pr
 
@@ -68,12 +70,12 @@ local stats: { [number]: Stats } = {}
 -- false: gh found no pull request for the branch.
 local prs: { [number]: Pr | false } = {}
 
-local function kv_key(tab_id: number): string
-	return "tab:" .. tostring(tab_id)
+local function kv_key(session_id: number): string
+	return "session:" .. tostring(session_id)
 end
 
-local function read_task(tab_id: number): Task?
-	local task: Task? = tern.kv.get(kv_key(tab_id))
+local function read_task(session_id: number): Task?
+	local task: Task? = tern.kv.get(kv_key(session_id))
 	if task ~= nil then
 		task.name = task.name or task.branch -- records saved before tasks had names
 	end
@@ -90,33 +92,14 @@ local function current_tab(cx: WindowCx): number?
 end
 
 local function open_tasks(cx: WindowCx): { OpenTask }
-	local here = current_tab(cx)
 	local found = {}
-	for _, s in cx.session:sessions() do
-		for _, tab in s.tabs do
-			local task = read_task(tab)
-			if task ~= nil then
-				table.insert(found, { id = tab, session = s.id, task = task, current = s.current and tab == here })
-			end
+	for _, s in cx.sessions:list() do
+		local task = read_task(s.id)
+		if task ~= nil then
+			table.insert(found, { id = s.id, task = task, current = s.current })
 		end
 	end
 	return found
-end
-
--- Shows a tab, switching to its session first.
-local function show_tab(cx: WindowCx, tab: number)
-	for _, s in cx.session:sessions() do
-		if table.find(s.tabs, tab) ~= nil then
-			if not s.current then
-				cx.sessions:switch(s.id)
-			end
-			local layout = cx.session:layout(tab)
-			if layout ~= nil then
-				cx.layout:focus(layout.focus)
-			end
-			return
-		end
-	end
 end
 
 local function focused_cwd(cx: WindowCx): string?
@@ -428,7 +411,7 @@ local function set_dashboard_repo(cx: WindowCx)
 end
 
 ---------------------------------------------------------------------------
--- Status in tab names
+-- Status in session names
 
 local NAME_SEPARATOR = " · "
 local CHECK_MARKS = { pass = "✓", fail = "✗", pending = "●" }
@@ -466,27 +449,26 @@ local function status_suffix(id: number): string
 	return NAME_SEPARATOR .. table.concat(parts, NAME_SEPARATOR)
 end
 
--- Renames each task's tab to "<task name><status suffix>", only when that
--- changes it. The part before the first separator is the task's name, so
--- renaming a tab by hand renames its task.
-local function apply_tab_names(cx: WindowCx)
-	if not STATUS_IN_TAB_NAMES then
+-- Renames each task's session to "<task name><status suffix>", only when
+-- that changes it. The part before the first separator is the task's name,
+-- so renaming a session by hand renames its task.
+local function apply_session_names(cx: WindowCx)
+	if not STATUS_IN_SESSION_NAMES then
 		return
 	end
-	for _, tab in cx.session:tabs() do
-		local task = read_task(tab.id)
+	for _, s in cx.sessions:list() do
+		local task = read_task(s.id)
 		-- Wait for both answers, so a reload doesn't strip the suffix and
 		-- put it back a moment later.
-		if task ~= nil and stats[tab.id] ~= nil and prs[tab.id] ~= nil then
-			local name = tab.name or ""
-			local base = string.match(name, "^(.-)" .. NAME_SEPARATOR) or name
+		if task ~= nil and stats[s.id] ~= nil and prs[s.id] ~= nil then
+			local base = string.match(s.name, "^(.-)" .. NAME_SEPARATOR) or s.name
 			if base ~= "" and base ~= task.name then
 				task.name = base
-				tern.kv.set(kv_key(tab.id), task)
+				tern.kv.set(kv_key(s.id), task)
 			end
-			local wanted = task.name .. status_suffix(tab.id)
-			if name ~= wanted then
-				cx.layout:name_tab(tab.id, wanted)
+			local wanted = task.name .. status_suffix(s.id)
+			if s.name ~= wanted then
+				cx.sessions:rename(s.id, wanted)
 			end
 		end
 	end
@@ -586,7 +568,7 @@ local function refresh_stats(cx: WindowCx)
 			end
 		end
 		render_dashboard(cx2)
-		apply_tab_names(cx2)
+		apply_session_names(cx2)
 	end)
 end
 
@@ -623,12 +605,12 @@ local function refresh_prs(cx: WindowCx)
 			end
 		end
 		render_dashboard(cx2)
-		apply_tab_names(cx2)
+		apply_session_names(cx2)
 	end)
 end
 
 -- Refreshes every task's git and PR state, for the dashboard and the
--- tab names. with_prs: also ask GitHub, which is slower and
+-- session names. with_prs: also ask GitHub, which is slower and
 -- rate-limited, so the refresh loop does it only every few ticks. redraw:
 -- false leaves drawing to the process callbacks (the refresh loop's timer
 -- only starts work).
@@ -699,57 +681,73 @@ local function remove_worktree(task: Task)
 	)
 end
 
--- Task tabs being closed on purpose (Close tab, Close session, Delete
--- task), until their tab_closed. at: os.time() of the request; remove:
--- whether to remove the worktree; return_to: the pane to show again (Delete
--- task from the dashboard switches away to close the task's tab).
+-- Poll only an explicitly requested session close. Closing individual tabs or
+-- an agent exiting must never remove a task's worktree.
+local function session_closed(cx: WindowCx, id: number): boolean
+	for _, session in cx.sessions:list() do
+		if session.id == id then
+			return session.tabs == 0 -- closing the final session leaves it empty
+		end
+	end
+	return true
+end
+
 type Closing = { at: number, remove: boolean, return_to: number? }
 local closing: { [number]: Closing } = {}
 
-local function tab_closed(cx: WindowCx, tab: number)
-	local task = read_task(tab)
-	if task == nil then
-		return
-	end
-	tern.kv.set(kv_key(tab), nil)
-	stats[tab] = nil
-	prs[tab] = nil
-	local asked = closing[tab]
-	closing[tab] = nil
-	if asked ~= nil and os.time() - asked.at <= CLOSE_INTENT_S then
-		if asked.return_to ~= nil then
-			local back = cx.session:tab_of(asked.return_to :: number)
-			if back ~= nil then
-				pcall(show_tab, cx, back)
-			end
+local function await_close(id: number, intent: Closing)
+	tern.timer(CLOSE_POLL_MS, function(cx)
+		if cx == nil or closing[id] ~= intent then
+			return
 		end
-		if asked.remove then
-			remove_worktree(task)
+		if session_closed(cx, id) then
+			closing[id] = nil
+			local task = read_task(id)
+			tern.kv.set(kv_key(id), nil)
+			stats[id], prs[id] = nil, nil
+			if intent.return_to ~= nil then
+				pcall(function()
+					cx.sessions:switch(intent.return_to)
+				end)
+			end
+			if task ~= nil and intent.remove then
+				remove_worktree(task)
+			else
+				refresh_tasks(cx)
+			end
+		elseif os.time() - intent.at < CLOSE_INTENT_S then
+			await_close(id, intent)
+		else
+			closing[id] = nil -- confirmation cancelled or still unanswered
+		end
+	end)
+end
+
+local function close_task_session(cx: WindowCx, id: number, remove: boolean)
+	for _, session in cx.sessions:list() do
+		if session.id == id then
+			if session.locked then
+				cx:toast("info", "Unlock the task's session before deleting it")
+				return
+			end
+			local current = cx.sessions:current().id
+			local intent: Closing = {
+				at = os.time(),
+				remove = remove,
+				return_to = if current ~= id then current else nil,
+			}
+			closing[id] = intent
+			cx.sessions:switch(id)
+			cx:command("close_session") -- built-in confirmation; overrides are bypassed
+			await_close(id, intent)
 			return
 		end
 	end
-	-- Closed some other way (its last pane exited, say): keep the worktree
-	-- and branch, and forget the task.
-	refresh_tasks(cx)
 end
 
--- Tern's own Close tab on the task's tab, with its confirmation; the
--- tab_closed hook does the rest.
-local function close_task_tab(cx: WindowCx, tab: number, remove: boolean)
-	local focused = cx.session:focused()
-	closing[tab] = {
-		at = os.time(),
-		remove = remove,
-		return_to = if focused ~= nil and cx.session:tab_of(focused) ~= tab then focused else nil,
-	}
-	show_tab(cx, tab)
-	cx:command("close_tab")
-end
-
-local function delete_task(cx: WindowCx, tab: number, task: Task)
+local function delete_task(cx: WindowCx, id: number, task: Task)
 	if not tern.fs.exists(task.path) then
-		-- Worktree already removed by hand: just close the tab.
-		close_task_tab(cx, tab, false)
+		close_task_session(cx, id, false)
 		return
 	end
 	tern.process.run(
@@ -767,7 +765,7 @@ local function delete_task(cx: WindowCx, tab: number, task: Task)
 				cx2:toast("error", "Task has uncommitted changes; commit or stash them first", task.path)
 				return
 			end
-			close_task_tab(cx2, tab, true)
+			close_task_session(cx2, id, true)
 		end
 	)
 end
@@ -813,18 +811,18 @@ local function base_label(base: string?): string
 	return base
 end
 
--- Opens the tab for a task whose worktree is ready, in the current session,
--- with the default agent in the worktree as its only pane.
-local function open_task_tab(cx: WindowCx, task: Task)
-	local tab = cx.layout:tab({ name = task.name, cwd = task.path })
-	if tab == nil then
-		cx:toast("error", "Could not open a tab for " .. task.name, task.path)
-		return
-	end
+-- Opens the session for a task whose worktree is ready, with the agent in it.
+local function open_task_session(cx: WindowCx, task: Task)
+	local session = cx.sessions:create({ name = task.name, cwd = task.path })
+	tern.kv.set(kv_key(session.id), task)
+	tern.kv.set("last_main", task.main)
+	cx:toast("success", "Task started: " .. task.name, task.path)
+	refresh_tasks(cx)
 	if OPEN_AGENT then
-		-- The agent takes the place of the new tab's lone shell; Tern does
-		-- the replacing, as closing the shell from here would close the tab.
-		-- Failing that, Tern's own New agent block beside the shell.
+		-- The default agent in the worktree, taking the place of the new
+		-- session's lone shell. Failing that, Tern's own
+		-- New agent block beside the shell. Last, so little runs after the
+		-- heaviest step.
 		local started = pcall(function()
 			cx.agents:start({ prompt = "", cwd = task.path, how = "replace_if_alone" })
 		end)
@@ -832,15 +830,9 @@ local function open_task_tab(cx: WindowCx, task: Task)
 			cx:command("new_agent_block")
 		end
 	end
-	local id = tab :: number
-	cx.layout:name_tab(id, task.name)
-	tern.kv.set(kv_key(id), task)
-	tern.kv.set("last_main", task.main)
-	cx:toast("success", "Task started: " .. task.name, task.path)
-	refresh_tasks(cx)
 end
 
--- The task whose worktree is being created, kept until its tab opens: a
+-- The task whose worktree is being created, kept until its session opens: a
 -- reload drops the callback of the process creating it (a linked plugin
 -- reloads on any change in its folder, .git included, so a task started in
 -- the plugin's own repository always reloads it), and the next load finishes
@@ -869,7 +861,7 @@ local function start_task(cwd: string, task: Task)
 			-- dashboard compares with the main checkout's branch.
 			local used = trim(r.stdout)
 			task.base = if used ~= "" and used ~= "HEAD" then used else nil
-			open_task_tab(cx, task)
+			open_task_session(cx, task)
 		end
 	)
 end
@@ -911,7 +903,7 @@ local function resume_pending_task()
 				tern.kv.set(PENDING_KEY, nil)
 				-- The base the script resolved is lost with its output; a
 				-- requested base is the same, and none compares with HEAD.
-				open_task_tab(cx, task)
+				open_task_session(cx, task)
 			elseif not listed and age > PENDING_MISSING_S then
 				tern.kv.set(PENDING_KEY, nil)
 				cx:toast("error", "Could not create the task's worktree", task.path)
@@ -1175,10 +1167,10 @@ tern.command({
 	title = "Delete task",
 	group = "Tasks",
 	run = function(cx)
-		local tab = current_tab(cx)
-		local task = if tab ~= nil then read_task(tab) else nil
-		if tab ~= nil and task ~= nil then
-			delete_task(cx, tab, task)
+		local id = cx.sessions:current().id
+		local task = read_task(id)
+		if task ~= nil then
+			delete_task(cx, id, task)
 			return
 		end
 		local tasks = open_tasks(cx)
@@ -1282,7 +1274,7 @@ local function task_action(act: string, value: string?, cx: WindowCx): boolean
 		render_settings(cx)
 		cx:toast("success", "New tasks branch from " .. base_label(nil))
 	elseif act == "open" and id ~= nil then
-		show_tab(cx, id)
+		cx.sessions:switch(id)
 	elseif act == "delete" and id ~= nil then
 		local task = read_task(id)
 		if task ~= nil then
@@ -1313,31 +1305,20 @@ tern.route.link(function(link: LinkRequest, cx: WindowCx): RouteDecision?
 	return nil
 end)
 
--- Close tab and Close session on task tabs remove their worktrees once the
--- tabs close; Tern's own commands run, confirmation included.
-tern.override("close_tab", function(cx)
-	local tab = current_tab(cx)
-	if tab ~= nil and read_task(tab) ~= nil then
-		closing[tab] = { at = os.time(), remove = true }
-	end
-	return false
-end)
-
+-- Let Tern handle confirmation and locks; clean up only after it closes.
 tern.override("close_session", function(cx)
-	for _, s in cx.session:sessions() do
-		if s.current and not s.locked then
-			for _, tab in s.tabs do
-				if read_task(tab) ~= nil then
-					closing[tab] = { at = os.time(), remove = true }
-				end
-			end
-		end
+	local session = cx.sessions:current()
+	if session.tabs == 0 and closing[session.id] == nil then
+		-- Tern may close an empty session after its last pane exits. Forget
+		-- ownership without removing files, including for the final session.
+		tern.kv.set(kv_key(session.id), nil)
+		stats[session.id], prs[session.id] = nil, nil
+	elseif read_task(session.id) ~= nil and not session.locked and session.tabs > 0 then
+		local intent: Closing = { at = os.time(), remove = true }
+		closing[session.id] = intent
+		await_close(session.id, intent)
 	end
 	return false
-end)
-
-tern.on("tab_closed", function(ev: TabEvent, cx: WindowCx)
-	tab_closed(cx, ev.tab)
 end)
 
 ---------------------------------------------------------------------------
@@ -1349,18 +1330,58 @@ end)
 local NEW_TASK_CHORD = "cmd+shift+n"
 local NEW_TASK_ACTION = "plugin." .. tern.plugin.id .. ".new_task"
 
--- Tasks used to be sessions, recorded under "session:<id>". Each moves to
--- its session's first tab, which then cleans up the worktree on Close tab.
-local function migrate_session_tasks(cx: WindowCx)
-	for _, s in cx.session:sessions() do
-		local key = "session:" .. tostring(s.id)
-		local task = tern.kv.get(key)
-		if task ~= nil then
-			local tab = s.tabs[1]
-			if tab ~= nil and read_task(tab) == nil then
-				tern.kv.set(kv_key(tab), task)
+-- Adopt a single legacy task in place. Shared sessions keep their running
+-- panes: each legacy task is moved atomically into a new session. Migrate
+-- one per tick to stay within the UI handler budget.
+local function migrate_tab_tasks(cx: WindowCx)
+	for _, session in cx.session:sessions() do
+		for _, tab in session.tabs do
+			local key = "tab:" .. tostring(tab)
+			local task: Task? = tern.kv.get(key)
+			if task ~= nil then
+				task.name = task.name or task.branch
+				if #session.tabs == 1 and read_task(session.id) == nil then
+					tern.kv.set(kv_key(session.id), task)
+					cx.sessions:rename(session.id, task.name)
+				else
+					local blocks = {}
+					for _, pane in cx.session:panes() do
+						if pane.tab == tab then
+							table.insert(blocks, pane.pane)
+						end
+					end
+					if #blocks == 0 then
+						return
+					end
+					local focused = cx.session:focused()
+					local previous = cx.sessions:current().id
+					cx.sessions:switch(session.id) -- create on the task's host
+					local target = cx.sessions:create({ name = task.name, cwd = task.path })
+					local moved, err = cx.layout:arrange({
+						session = target.id,
+						tabs = { { name = task.name, blocks = blocks } },
+						rest = "keep",
+					})
+					pcall(function()
+						cx.sessions:switch(previous)
+						if focused ~= nil then
+							cx.layout:focus(focused)
+						end
+					end)
+					if moved == nil then
+						cx:toast("error", "Could not migrate task " .. task.name, err)
+						return -- retain the old record and every running pane
+					end
+					tern.kv.set(kv_key(target.id), task)
+				end
+				tern.kv.set(key, nil)
+				tern.timer(0, function(cx2)
+					if cx2 ~= nil then
+						migrate_tab_tasks(cx2)
+					end
+				end)
+				return
 			end
-			tern.kv.set(key, nil)
 		end
 	end
 end
@@ -1374,10 +1395,10 @@ tern.timer(0, function(cx)
 		tern.kv.set("new_task_bound", true)
 		cx:toast("info", "⌘⇧N now starts a new task")
 	end
-	migrate_session_tasks(cx)
+	migrate_tab_tasks(cx)
 	migrate_dashboard_canvas(cx)
 	resume_pending_task()
-	-- Keep tab names and dashboard blocks up to date. A timer starts the
+	-- Keep session names and dashboard blocks up to date. A timer starts the
 	-- work; the process callbacks send snapshots to the block renderer.
 	-- The first refresh waits out window startup, when the UI thread is
 	-- busy enough for a callback to overrun its budget.

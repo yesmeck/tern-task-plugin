@@ -1,8 +1,8 @@
 schema = 1
-id = "worktree-tabs"
+id = "worktree-sessions"
 name = "Tasks"
-version = "0.10.3"
-description = "A task is a tab with its own git worktree: New task creates both, Delete task removes them, and the task dashboard shows the current repository's."
+version = "0.11.0"
+description = "A task is a session with its own git worktree: New task creates both, Delete task removes them, and the task dashboard shows the current repository's."
 window = "window.luau"
 host = "host.luau"
 styles = ["dashboard.css"]

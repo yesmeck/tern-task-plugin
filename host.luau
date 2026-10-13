@@ -49,7 +49,7 @@ local dashboard: BlockDef<Snapshot> = {
 			end
 			for _, card in snapshot.tasks do
 				local old = previous[card.id]
-				if old ~= nil then
+				if old ~= nil and old.path == card.path then
 					if card.stats == nil then
 						card.stats = old.stats
 					end
@@ -61,7 +61,7 @@ local dashboard: BlockDef<Snapshot> = {
 			state.main, state.tasks = snapshot.main, snapshot.tasks
 		elseif ev.act == "refresh" or ev.act == "new" or ev.act == "settings" or ev.act == "open" or ev.act == "delete" then
 			-- Host effects route back through the originating window's link
-			-- handler, retaining prompts, tab focus and deletion confirmation.
+			-- handler, retaining prompts, session focus and deletion confirmation.
 			cx:open(tern.plugin.id .. "://dashboard/" .. ev.act .. "/" .. (ev.value or ""))
 		end
 	end,

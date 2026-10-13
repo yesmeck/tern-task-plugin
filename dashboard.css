@@ -1,4 +1,4 @@
-.sf-main[data-surface='plugin.worktree-tabs.dashboard'] { line-height: 1.5em; }
+.sf-main[data-surface='plugin.worktree-sessions.dashboard'] { line-height: 1.5em; }
 .tk-board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
 .tk-column { flex: 1 1 0; min-width: 260px; display: flex; flex-direction: column; gap: 8px; }
 .tk-column > .sf-card > .sf-card-body { padding-left: 12px; }
