@@ -49,6 +49,7 @@ local CLOSE_INTENT_S = 120
 local DASHBOARD_KIND = tern.plugin.id .. ".dashboard"
 local DASHBOARD_LINK_PREFIX = tern.plugin.id .. "://dashboard/"
 local DASHBOARD_REFRESH_MS = 15000
+local STARTUP_REFRESH_DELAY_MS = 3000
 -- Start the default agent in a new task's tab.
 local OPEN_AGENT = true
 -- Append each task's status to its tab name ("Fix login · #3413 ✓ · ±2").
@@ -236,13 +237,29 @@ end
 ---------------------------------------------------------------------------
 -- Dashboard
 
-local function dashboard_pane(cx: WindowCx): number?
+-- The current session's dashboard, or else one in another session. Panes
+-- list every session's, so only_current limits it to the current one.
+local function dashboard_pane(cx: WindowCx, only_current: boolean?): number?
+	local tabs: { number }? = nil
+	local other: number? = nil
 	for _, pane in cx.session:panes() do
 		if pane.block == DASHBOARD_KIND then
-			return pane.pane
+			if tabs == nil then
+				tabs = {}
+				for _, s in cx.session:sessions() do
+					if s.current then
+						tabs = s.tabs
+					end
+				end
+			end
+			if pane.tab ~= nil and table.find(tabs :: { number }, pane.tab :: number) ~= nil then
+				return pane.pane
+			elseif other == nil then
+				other = pane.pane
+			end
 		end
 	end
-	return nil
+	return if only_current then nil else other
 end
 
 -- variant: "primary" or "danger" (see the board CSS).
@@ -307,7 +324,9 @@ local function finish_dashboard_migration(cx: WindowCx, pane: number)
 end
 
 local function render_dashboard(cx: WindowCx, select_repo: boolean?)
-	local pane = dashboard_pane(cx)
+	-- A repository picked from this session must not refilter another
+	-- session's board; a dashboard opened here takes dashboard_main.
+	local pane = dashboard_pane(cx, select_repo)
 	if pane == nil then
 		return
 	end
@@ -1186,7 +1205,7 @@ tern.command({
 	group = "Tasks",
 	run = function(cx)
 		set_dashboard_repo(cx)
-		local pane = dashboard_pane(cx)
+		local pane = dashboard_pane(cx, true)
 		if pane ~= nil then
 			pcall(function()
 				cx.layout:focus(pane :: number)
@@ -1357,9 +1376,16 @@ tern.timer(0, function(cx)
 	end
 	migrate_session_tasks(cx)
 	migrate_dashboard_canvas(cx)
+	resume_pending_task()
 	-- Keep tab names and dashboard blocks up to date. A timer starts the
 	-- work; the process callbacks send snapshots to the block renderer.
-	refresh_tasks(cx, true, false)
-	start_refresh_loop()
-	resume_pending_task()
+	-- The first refresh waits out window startup, when the UI thread is
+	-- busy enough for a callback to overrun its budget.
+	tern.timer(STARTUP_REFRESH_DELAY_MS, function(cx2)
+		if cx2 == nil then
+			return
+		end
+		refresh_tasks(cx2, true, false)
+		start_refresh_loop()
+	end)
 end)
